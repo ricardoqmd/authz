@@ -7,7 +7,10 @@ export default defineConfig({
       provider: "v8",
       all: true,
       include: ["src/**/*.ts"],
-      exclude: ["src/**/*.test.ts", "src/index.ts"],
+      // `src/index.ts` is NOT excluded: the barrel being invisible to coverage is what let a
+      // dropped export line show up as neither a failing test nor a gap. `index.test.ts`
+      // imports it, so the exclusion has nothing left to hide.
+      exclude: ["src/**/*.test.ts"],
       reporter: ["text", "lcov"],
     },
   },
