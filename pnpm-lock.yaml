@@ -29,6 +29,12 @@ importers:
 
   packages/authz-core: {}
 
+  packages/authz-http:
+    devDependencies:
+      '@ricardoqmd/authz-core':
+        specifier: workspace:*
+        version: link:../authz-core
+
 packages:
 
   '@babel/helper-string-parser@7.29.7':
