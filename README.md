@@ -51,6 +51,7 @@ coherent.
 | Package | Description |
 | ------- | ----------- |
 | `@ricardoqmd/authz-core` | Framework-agnostic state machine, types and decision logic |
+| `@ricardoqmd/authz-http` | A reference `AuthorizationTransport` over `fetch` |
 
 Bindings for React and Vue are planned; see [ROADMAP.md](./ROADMAP.md).
 
