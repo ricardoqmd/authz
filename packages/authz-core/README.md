@@ -123,6 +123,95 @@ Switching context discards the previous menu and the decision cache before the n
 starts, and an answer that arrives after the switch is dropped rather than rendered over the
 new context.
 
+## Surviving a reload, and knowing another tab changed the context
+
+Two **optional, injected** ports. Neither is implemented here: this package touches no DOM, no
+`window` and no `localStorage`, and its tests run without a browser. **The browser implementations —
+a `BroadcastChannel`, a `localStorage` store and the `storage`-event fallback — arrive in a separate
+package.**
+
+```ts
+const session = createAuthorizationSession({
+  app: "app-a",
+  transport,
+  maxPairsPerRequest: 200,
+  contextStore,  // optional: read / write / clear a context id
+  contextSignal, // optional: announce / subscribe
+});
+```
+
+**They are independent.** Supply the signal alone to let tabs learn about each other without writing
+anything into the browser; supply the store alone to survive a reload with no channel. No path reads
+the store because a notice arrived, and none announces because a value was written. A selection
+that was superseded before it finished announces nothing at all.
+
+**The stored context is a HINT; the server's list is the AUTHORITY.** At `start()` a stored id is
+honoured only when the list the decision point just returned contains it *and* that context grants
+access. Anything else — an arrangement that ended, another application's value, one edited by hand —
+is discarded and the store is cleared. A stored id never asserts that the subject holds a context.
+
+**A context is stored only once the session reaches `READY` under it**, and nowhere else. A selection
+that turns out to have no access, whose menu fetch fails, or whose menu comes back labelled with
+another context **writes nothing and leaves the previous value alone** — so a reload restores the last
+context that actually worked, instead of dropping the subject back into the screen they were trying to
+escape.
+
+A selection superseded **during the menu fetch** does not write either. One superseded **during the
+write itself may write** — the write completes before the check that follows it, and not writing
+would require knowing a supersession that has not happened yet. That costs nothing: the stored id is
+a hint, re-validated against the decision point's list at `start()`, so a stale one can cost a
+re-selection and never an access.
+
+**Neither port can take the session down.** A `read` that throws or rejects is treated as nothing
+persisted; a `write`, `clear` or `announce` that throws is ignored and the selection still completes.
+`localStorage` throws in a private window and when a quota is full, and a channel throws once its
+document is discarded.
+
+### `CONTEXT_CHANGED_ELSEWHERE`
+
+When another tab announces a different context, the session moves to this state and — in the same
+step — drops its active context, clears its decision cache and bumps its generation.
+
+**The screen keeps its menu and the session stops answering.** The menu is your DOM and this package
+does not touch it, so a half-typed form is not lost. But `decide()` returns the empty list, and absent
+resolves to `DENY` through `decisionFor`. That is the honest answer, not the harsh one: the backend
+reads the active context from the same shared place the other tab just wrote, so a button this session
+kept painting would be a button the backend refuses.
+
+It carries `contextId` (the one now active elsewhere) and `previousContextId` (the one this session
+was in) — the second is what lets a banner say which context the work on screen belongs to.
+
+**There is no `dismiss()`.** The state is left the way every other state is left: `start()`, which
+re-lists and restores, or `selectContext()`. A dismissal would let a consumer hide the banner and keep
+working in a context the subject has left.
+
+### `close()`
+
+**The session stops answering.** It marks itself closed, drops its active context, empties its
+decision cache, bumps its generation and **emits one final `IDLE`** — in that order, emission before
+the listeners are dropped, so a binding gets the one render it needs to clear the screen. It is marked
+closed **before** that emission, so a listener that re-enters `start()` or `selectContext()` from it
+is served by a session that is already inert. Afterwards `decide()` returns the empty
+list (absent is `DENY`), `start()` and `selectContext()` resolve without calling the transport and
+without touching state — `selectContext()` does not even raise its `RangeError` — `subscribe()`
+registers nothing, and `getState()` is `IDLE`. Silence rather than exceptions, so a route guard that
+was already awaiting `start()` does not blow up because something closed the session first.
+
+**Why it stops answering, and not just unsubscribes:** a different person signing in on the same
+browser gets a token for another subject on the next refresh. The backend refuses that tab — no data
+crosses — but the menu already painted and the decisions already cached belong to the previous person.
+The new person does not see their records; they see their silhouette: which sections existed, which
+actions were available, whether that person was an administrator. In a package where the menu *is* the
+permission, that says plenty. The consumer's half is to watch the subject and call `close()`; this is
+the package's half.
+
+⚠️ **It cannot cancel a call already in flight** — this package never owned that `fetch`. What it
+guarantees is that the answer is thrown away.
+
+Idempotent. **It does not close the injected signal** — you created that channel, you close it. An
+application that builds a session per route and never calls this accumulates one live listener per
+navigation, each holding a whole session alive.
+
 ## What it does not do
 
 - It does not talk to a policy engine. The browser never reaches one; the application's
