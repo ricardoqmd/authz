@@ -19,3 +19,5 @@ export type {
   AuthorizationState,
 } from "./session.js";
 export { createAuthorizationSession } from "./session.js";
+
+export type { ContextSignal, ContextStore } from "./context-sync.js";
