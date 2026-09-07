@@ -10,29 +10,6 @@
 import type { Decision, PermissionEntry } from "./decision.js";
 
 /**
- * One authorization context the subject may work under.
- *
- * A subject may hold several: the same person can act under more than one arrangement,
- * and each one carries its own permissions. Which one is active is a choice, not a
- * property of the person.
- */
-export interface AuthorizationContext {
-  /**
-   * Opaque identifier of the context.
-   *
-   * **This library never interprets it.** It is not parsed, not split, not compared for
-   * meaning, not sorted by and not logged. It is passed back to the transport exactly as
-   * it arrived. A client that could read structure out of this string would start making
-   * decisions from it, and those decisions would be unenforceable.
-   */
-  readonly contextId: string;
-  /** Human-readable name, for a picker. Display only; never used to decide. */
-  readonly label: string;
-  /** Whether this context grants entry to the application being asked about. */
-  readonly hasAccess: boolean;
-}
-
-/**
  * A request for instance-level decisions: the cross product of `actions` and
  * `resourceIds` over one resource type.
  */
@@ -42,19 +19,13 @@ export interface DecisionRequest {
   readonly resourceIds: readonly string[];
 }
 
-/** The type-level answer: what the subject may attempt at all, in one app and context. */
+/** The type-level answer: what the subject may attempt at all, in one application. */
 export interface PermissionMenu {
   /**
    * The `app` this answer is about. **Your transport must echo the value it was called
    * with.** An answer whose `app` does not match is discarded — silently and fail-closed.
    */
   readonly app: string;
-  /**
-   * The context this answer is about. **Your transport must echo the value it was called
-   * with.** An answer whose `contextId` does not match is discarded — silently and
-   * fail-closed.
-   */
-  readonly contextId: string;
   readonly permissions: readonly PermissionEntry[];
   /** When the decision point computed this menu. Diagnostic; never used to decide. */
   readonly computedAt?: string;
@@ -67,12 +38,6 @@ export interface DecisionSet {
    * with.** An answer whose `app` does not match is discarded — silently and fail-closed.
    */
   readonly app: string;
-  /**
-   * The context this answer is about. **Your transport must echo the value it was called
-   * with.** An answer whose `contextId` does not match is discarded — silently and
-   * fail-closed.
-   */
-  readonly contextId: string;
   readonly decisions: readonly Decision[];
 }
 
@@ -112,11 +77,8 @@ export class AuthorizationTransportError extends Error {
  * subject could name a different one.
  */
 export interface AuthorizationTransport {
-  /** The contexts the subject may work under, for this application. */
-  listContexts(app: string): Promise<readonly AuthorizationContext[]>;
-
-  /** The type-level menu for one context. */
-  fetchPermissions(app: string, contextId: string): Promise<PermissionMenu>;
+  /** The type-level menu: what the subject may attempt at all, in this application. */
+  fetchPermissions(app: string): Promise<PermissionMenu>;
 
   /**
    * Instance-level decisions for one chunk of a request.
@@ -124,9 +86,5 @@ export interface AuthorizationTransport {
    * The chunking is done by this library — see `splitDecisionRequest`. An implementation
    * receives requests already within the cap it declared and does not need to split again.
    */
-  fetchDecisions(
-    app: string,
-    contextId: string,
-    request: DecisionRequest,
-  ): Promise<DecisionSet>;
+  fetchDecisions(app: string, request: DecisionRequest): Promise<DecisionSet>;
 }

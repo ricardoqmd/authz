@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { AuthorizationTransportError } from "./transport.js";
 import {
   type Decision,
+  type DecisionEffect,
   type PermissionEntry,
   decisionFor,
   isRenderable,
@@ -21,6 +23,38 @@ describe("isRenderable", () => {
   // this is the test that stops it.
   it("renders a conditional", () => {
     expect(isRenderable("CONDITIONAL")).toBe(true);
+  });
+
+  // An allowlist and not a denylist, and this is the case that says so.
+  //
+  // Written as `effect !== "DENY"` the three tests above still pass, because all three name
+  // effects the union declares. What changes is an effect the union does NOT declare: a decision
+  // point that grows a new one — a spelling change, a new verb, an unreleased feature — would have
+  // its actions DRAWN instead of hidden. The collapse already ranks an unknown effect
+  // restrictively, but the collapse is not what decides whether the button appears; this is.
+  //
+  // The cast is the point of the test rather than a shortcut around the types: the value being
+  // modelled is one that arrives from the network, where the union is a hope and not a guarantee.
+  it("does not render an effect it has never heard of", () => {
+    expect(isRenderable("SOMETHING_NEW" as DecisionEffect)).toBe(false);
+  });
+});
+
+describe("AuthorizationTransportError", () => {
+  // The kind is pinned in several places because it decides a state. The NAME was not pinned
+  // anywhere: it is what a `catch` prints and what a consumer's error reporting groups by, and
+  // this class exists precisely so a transport failure is distinguishable from any other throw.
+  it("names itself, so a catch can tell it apart from an ordinary Error", () => {
+    const e = new AuthorizationTransportError("UNAVAILABLE", "down");
+
+    expect(e.name).toBe("AuthorizationTransportError");
+    expect(e.kind).toBe("UNAVAILABLE");
+    expect(e).toBeInstanceOf(Error);
+  });
+
+  // No message: the kind stands in, so the error is never blank.
+  it("falls back to the kind when no message is given", () => {
+    expect(new AuthorizationTransportError("NO_ACCESS_IN_APP").message).toBe("NO_ACCESS_IN_APP");
   });
 });
 
