@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import * as api from "./index.js";
 import type {
-  AuthorizationContext,
   AuthorizationSession,
   AuthorizationSessionOptions,
   AuthorizationState,
@@ -57,7 +56,6 @@ describe("the public surface", () => {
       effect?: DecisionEffect;
       entry?: PermissionEntry;
       decision?: Decision;
-      context?: AuthorizationContext;
       transport?: AuthorizationTransport;
       request?: DecisionRequest;
       set?: DecisionSet;

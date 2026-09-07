@@ -1,6 +1,5 @@
 import {
   AuthorizationTransportError,
-  type AuthorizationContext,
   type AuthorizationTransport,
   type DecisionRequest,
   type DecisionSet,
@@ -19,17 +18,27 @@ export interface HttpTransportConfig {
   /** Where the three routes hang from. Joined with the paths below; a trailing slash is fine. */
   readonly baseUrl: string;
   /**
-   * The request header the `contextId` travels in.
+   * The authorization context to send, **optional**.
+   *
+   * **Omit it and this package has no context concept at all**: no header is sent and no echo is
+   * required, which is the mode a consumer whose backend has never heard of contexts uses.
+   *
+   * When it IS supplied, {@link contextHeader} must be too, and the response body is required to
+   * echo it back — see the constructor's rejection rules.
+   *
+   * <p>Two preconditions on the value, because the symptom of breaking either is an opaque failure
+   * rather than a message: it is sent **as a header value**, so it must be a valid one; and
+   * **leading or trailing whitespace is not preserved** — the platform trims it on the wire,
+   * silently, so a value that depends on it will not arrive as written.
+   */
+  readonly contextId?: string;
+  /**
+   * The request header {@link contextId} travels in. **Required only when `contextId` is given.**
    *
    * **Configuration and never a constant.** This package must not know what any deployment calls
    * its authorization context, and a name baked in here would be exactly that knowledge.
-   *
-   * <p>Two preconditions on the `contextId` itself, because the symptom of breaking either is an
-   * opaque failure rather than a message: it is sent **as a header value**, so it must be a valid
-   * one; and **leading or trailing whitespace is not preserved** — the platform trims it on the
-   * wire, silently, so a value that depends on it will not arrive as written.
    */
-  readonly contextHeader: string;
+  readonly contextHeader?: string;
   /**
    * The bearer token, or `null` when there is none.
    *
@@ -61,25 +70,48 @@ export interface HttpTransportConfig {
  *
  * <h2>Why this adapter is strict where the core is silent</h2>
  *
- * The core discards a response whose `app` or `contextId` does not match what it asked about —
- * silently and fail-closed, which is right, because an answer about another context is worse than
- * no answer. It has a documented trap: an adapter that casts a body without those fields produces a
+ * The core discards a response whose `app` does not match what it asked about — silently and
+ * fail-closed, which is right, because an answer about another application is worse than no
+ * answer. It has a documented trap: an adapter that casts a body without that field produces a
  * **fully denied application with no error state anywhere**.
  *
  * This adapter closes the trap by failing loudly at the edge instead of quietly at the core. It
- * **reads `app` and `contextId` from the response body** and rejects when they are missing —
- * deliberately not filling them in from what it asked, which would make the core's guard
- * tautological and let a backend answering for the wrong context go unnoticed.
+ * **reads `app` from the response body** and rejects when it is missing — deliberately not filling
+ * it in from what it asked, which would make the core's guard tautological.
  *
  * At the edge the failure is a message a developer reads. Inside the core it would be a screen a
  * user cannot explain.
+ *
+ * <h2>The context pair, and why the echo check lives here now</h2>
+ *
+ * The core no longer knows what a context is, so the check that a response is about the context we
+ * asked about moved to where the knowledge is. Three modes, and the third is a construction error
+ * on purpose:
+ *
+ * - **Neither `contextId` nor `contextHeader`:** no header is sent, no echo is required. A backend
+ *   that has never heard of contexts works unchanged.
+ * - **Both:** the header carries the id, and a response body whose `contextId` does not echo it is
+ *   **rejected loudly**, with the same message discipline as every other rejection here — the route
+ *   and the field, never the body, never the token, never the header value.
+ * - **One without the other:** rejected at construction with a `RangeError` naming which is
+ *   missing. A header name with nothing to put in it, or an id with nowhere to send it, is a
+ *   configuration mistake, and discovering it as a `401` costs far more than discovering it here.
  */
 export function createHttpTransport(config: HttpTransportConfig): AuthorizationTransport {
-  const { baseUrl, contextHeader, getToken, classifyError } = config;
+  const { baseUrl, contextId, contextHeader, getToken, classifyError } = config;
   const doFetch = config.fetch ?? globalThis.fetch;
   const root = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
 
-  async function headers(contextId?: string): Promise<Record<string, string>> {
+  // Rejected HERE and not at the first call: a misconfiguration that only surfaces once a route is
+  // exercised is one a consumer meets in an environment, not in a test.
+  if (contextId !== undefined && contextHeader === undefined) {
+    throw new RangeError("contextHeader is required when contextId is supplied");
+  }
+  if (contextHeader !== undefined && contextId === undefined) {
+    throw new RangeError("contextId is required when contextHeader is supplied");
+  }
+
+  async function headers(): Promise<Record<string, string>> {
     const out: Record<string, string> = { Accept: "application/json" };
     const token = await getToken();
     // Omitted ENTIRELY when there is no token. `Authorization: Bearer ` is a different statement
@@ -91,7 +123,7 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
     if (token) {
       out.Authorization = `Bearer ${token}`;
     }
-    if (contextId !== undefined) {
+    if (contextId !== undefined && contextHeader !== undefined) {
       out[contextHeader] = contextId;
     }
     return out;
@@ -105,11 +137,11 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
    * reintroducing it from below would undo that. The message is built from the route and the
    * status, and from nothing else — never the body, never the token, never the header value.
    */
-  async function call(route: string, init: RequestInit, contextId?: string): Promise<unknown> {
+  async function call(route: string, init: RequestInit): Promise<unknown> {
     const url = `${root}${route}`;
     let response: Response;
     try {
-      response = await doFetch(url, { ...init, headers: await headers(contextId) });
+      response = await doFetch(url, { ...init, headers: await headers() });
     } catch {
       throw new AuthorizationTransportError("UNAVAILABLE", `${route}: the request did not complete`);
     }
@@ -149,36 +181,45 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
     return body;
   }
 
-  return {
-    async listContexts(app) {
-      const route = `/me/apps/${segment(app)}/contracts`;
-      // No context header here: this is the call that asks WHICH contexts exist.
-      const body = await call(route, { method: "GET" });
-      return contexts(body, route);
-    },
+  /**
+   * The echo check, in the one place that still knows what was asked.
+   *
+   * Only runs when a `contextId` was configured. It reads the field from the body and compares —
+   * it does not fill it in from what it sent, which would make the check tautological and let a
+   * backend answering for the wrong context go unnoticed.
+   */
+  function requireContextEcho(record: Record<string, unknown>, route: string): void {
+    if (contextId === undefined) {
+      return;
+    }
+    const echoed = required(record, "contextId", route);
+    if (echoed !== contextId) {
+      throw new AuthorizationTransportError(
+        "UNAVAILABLE",
+        `${route}: the response "contextId" does not echo the one that was sent`,
+      );
+    }
+  }
 
-    async fetchPermissions(app, contextId) {
+  return {
+    async fetchPermissions(app) {
       const route = `/me/apps/${segment(app)}/permissions`;
-      const body = await call(route, { method: "GET" }, contextId);
+      const body = await call(route, { method: "GET" });
       const record = object(body, route);
+      requireContextEcho(record, route);
       return {
         app: required(record, "app", route),
-        contextId: required(record, "contextId", route),
         permissions: array(record, "permissions", route) as PermissionMenu["permissions"],
       };
     },
 
-    async fetchDecisions(app, contextId, request: DecisionRequest) {
+    async fetchDecisions(app, request: DecisionRequest) {
       const route = `/me/apps/${segment(app)}/decisions`;
-      const body = await call(
-        route,
-        { method: "POST", body: JSON.stringify(request) },
-        contextId,
-      );
+      const body = await call(route, { method: "POST", body: JSON.stringify(request) });
       const record = object(body, route);
+      requireContextEcho(record, route);
       return {
         app: required(record, "app", route),
-        contextId: required(record, "contextId", route),
         decisions: array(record, "decisions", route) as DecisionSet["decisions"],
       };
     },
@@ -230,32 +271,4 @@ function array(record: Record<string, unknown>, field: string, route: string): r
     );
   }
   return value;
-}
-
-/** The contexts call answers a top-level array, and every element must be a whole context. */
-function contexts(body: unknown, route: string): readonly AuthorizationContext[] {
-  if (!Array.isArray(body)) {
-    throw new AuthorizationTransportError("UNAVAILABLE", `${route}: the response is not an array`);
-  }
-  return body.map((element, index) => {
-    if (typeof element !== "object" || element === null) {
-      throw new AuthorizationTransportError(
-        "UNAVAILABLE",
-        `${route}: context at index ${index} is not an object`,
-      );
-    }
-    const record = element as Record<string, unknown>;
-    if (
-      typeof record.contextId !== "string" ||
-      typeof record.label !== "string" ||
-      typeof record.hasAccess !== "boolean"
-    ) {
-      throw new AuthorizationTransportError(
-        "UNAVAILABLE",
-        `${route}: context at index ${index} is missing "contextId", "label" or "hasAccess", ` +
-          `or one of them has the wrong type`,
-      );
-    }
-    return { contextId: record.contextId, label: record.label, hasAccess: record.hasAccess };
-  });
 }

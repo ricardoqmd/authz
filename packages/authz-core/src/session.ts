@@ -1,32 +1,34 @@
 /**
- * The authorization context a subject is working under, as a state machine.
+ * What a subject may do in one application, as a state machine.
  *
- * A subject may hold several contexts and only one is active at a time. Everything derived
- * from a context — the permission menu, the decision cache — belongs to that context and to
- * no other, and this file exists so that a consumer never has to remember that.
+ * **This package answers one question and has no notion of an authorization context.** The
+ * decision point the backend consults does not know what a context is either — the backend
+ * resolves one into subject attributes and pushes those — so resolving a context and evaluating
+ * permissions are separate responsibilities, and fusing them here would fuse what the rest of the
+ * system deliberately keeps apart. A consumer with no context concept at all implements the
+ * two-method port and needs nothing else.
  */
 
 import type { Decision, PermissionEntry } from "./decision.js";
 import { splitDecisionRequest } from "./batch.js";
 import {
   AuthorizationTransportError,
-  type AuthorizationContext,
   type AuthorizationTransport,
   type DecisionRequest,
 } from "./transport.js";
-import type { ContextSignal, ContextStore } from "./context-sync.js";
 
 /**
  * Where the session is.
  *
- * Three of these are screens a consumer must render differently, and collapsing any two of
- * them is the mistake this type prevents:
+ * Two of these are screens a consumer must render differently, and collapsing them is the
+ * mistake this type prevents:
  *
- * - `NO_CONTEXTS` — the subject holds none. Nothing to choose.
- * - `NO_ACCESS_IN_APP` — the context is real and does not open this application.
- * - `UNAVAILABLE` — no answer was obtained. **This is not an expired session and nothing
- *   here suggests re-authenticating.** Sending someone to sign in again because a decision
- *   point was unreachable teaches them that signing in fixes outages, and it does not.
+ * - `NO_ACCESS_IN_APP` — the decision point was reached and said this subject may not enter this
+ *   application. **Not the same as a `READY` with an empty menu**, which says "you may enter and
+ *   may do nothing". Two different screens.
+ * - `UNAVAILABLE` — no answer was obtained. **This is not an expired session and nothing here
+ *   suggests re-authenticating.** Sending someone to sign in again because a decision point was
+ *   unreachable teaches them that signing in fixes outages, and it does not.
  */
 export type AuthorizationState =
   /**
@@ -39,15 +41,9 @@ export type AuthorizationState =
    */
   | { readonly status: "IDLE" }
   | { readonly status: "LOADING" }
-  | { readonly status: "NO_CONTEXTS" }
-  | {
-      readonly status: "CHOOSING_CONTEXT";
-      readonly contexts: readonly AuthorizationContext[];
-    }
-  | { readonly status: "NO_ACCESS_IN_APP"; readonly contextId: string }
+  | { readonly status: "NO_ACCESS_IN_APP" }
   | {
       readonly status: "READY";
-      readonly contextId: string;
       readonly permissions: readonly PermissionEntry[];
     }
   /**
@@ -57,36 +53,7 @@ export type AuthorizationState =
    * would be one `render` away from a screen, unbounded and unlabelled. Diagnostics belong
    * to the transport, which already holds the original error.
    */
-  | { readonly status: "UNAVAILABLE" }
-  /**
-   * The context was changed in another tab, and this session is no longer answering.
-   *
-   * **The screen keeps its menu and the session stops answering, and both halves are deliberate.**
-   * The menu is the consumer's DOM and this package does not touch it, so a half-typed form is not
-   * lost. But the active context is gone: `decide()` returns the empty list, absent resolves to
-   * `DENY` through `decisionFor`, and anything still in flight is dropped by the generation check.
-   *
-   * Denying is the honest answer, not the harsh one. The backend reads the active context from the
-   * same shared place the other tab just wrote, so a button this session kept painting would be a
-   * button the backend refuses. Fail-closed here means the screen agrees with what will happen.
-   *
-   * **There is no way to dismiss it.** It is left the way every other state is left — by calling
-   * `start()`, which re-lists and restores the new context, or `selectContext()`. A dismissal would
-   * let a consumer hide the banner and keep working in a context the subject has left, which is the
-   * one outcome this state exists to prevent.
-   */
-  | {
-      readonly status: "CONTEXT_CHANGED_ELSEWHERE";
-      /** The context now active elsewhere. */
-      readonly contextId: string;
-      /**
-       * The context this session was in.
-       *
-       * Carried because the consumer needs it and can recover it from nowhere else: it is what lets
-       * a banner say which context the work on screen belongs to.
-       */
-      readonly previousContextId: string;
-    };
+  | { readonly status: "UNAVAILABLE" };
 
 /** What {@link createAuthorizationSession} needs to exist. */
 export interface AuthorizationSessionOptions {
@@ -115,25 +82,9 @@ export interface AuthorizationSessionOptions {
    * not a default anyone should arrive at by accident.
    */
   readonly maxCachedDecisions?: number;
-  /**
-   * Where the active context id is kept so it survives a reload. Optional.
-   *
-   * Supplying it turns on restoration at {@link AuthorizationSession.start} and persistence on every
-   * activation. **Independent of {@link contextSignal}** — either may be supplied without the other,
-   * and no path reads the store because a notice arrived.
-   */
-  readonly contextStore?: ContextStore;
-  /**
-   * How this tab tells the others the context changed, and hears about it. Optional.
-   *
-   * **Independent of {@link contextStore}** — a consumer that wants tabs to learn about each other
-   * without writing anything into the browser supplies only this one, and no path announces because
-   * a value was written.
-   */
-  readonly contextSignal?: ContextSignal;
 }
 
-/** The session. Everything on it is bound to the currently selected context. */
+/** The session. */
 export interface AuthorizationSession {
   /** The current state. Synchronous, always defined. */
   getState(): AuthorizationState;
@@ -141,10 +92,10 @@ export interface AuthorizationSession {
    * Observe changes. Returns a function that stops the subscription.
    *
    * **A listener owns its own errors.** If it throws, the throw is caught and discarded: the
-   * other listeners still receive the emission, and the call that was publishing — `start()`,
-   * `selectContext()`, `close()` — completes as if nothing had happened. Without that, one
-   * consumer's render bug escaped into this package, and during `close()` it was permanent: the
-   * listeners were never dropped, the signal never unsubscribed and the session never closed.
+   * other listeners still receive the emission, and the call that was publishing — `start()` or
+   * `close()` — completes as if nothing had happened. Without that, one consumer's render bug
+   * escaped into this package, and during `close()` it was permanent: the listeners were never
+   * dropped and the session never closed.
    *
    * **The throw is swallowed and NOT reported anywhere** — no callback, no console, no state.
    * This package deliberately has no diagnostic channel: `UNAVAILABLE` carries no `reason` for
@@ -153,28 +104,18 @@ export interface AuthorizationSession {
    * your own error handling inside the listener.
    */
   subscribe(listener: (state: AuthorizationState) => void): () => void;
-  /** Ask for the available contexts and settle into a state. */
+  /** Load the menu and settle into a state. Safe to call again; see the implementation. */
   start(): Promise<void>;
-  /**
-   * Make a context active.
-   *
-   * @throws RangeError if the id is not one of the known contexts. That is a programming
-   *     error — the ids come from this session — and the state does not change.
-   */
-  selectContext(contextId: string): Promise<void>;
-  /** Instance-level decisions for the active context. See the method's own contract. */
+  /** Instance-level decisions. See the method's own contract. */
   decide(request: DecisionRequest): Promise<readonly Decision[]>;
   /**
    * Stop listening and make the session inert. Idempotent.
    *
-   * **The session stops answering.** It bumps the generation, empties the decision cache, drops the
-   * active context and emits {@link AuthorizationState} `IDLE` — and only then drops the listeners
-   * and unsubscribes from the signal. Afterwards `decide()` returns the empty list, so absent is
-   * `DENY` through `decisionFor`; `start()` and `selectContext()` resolve without calling the
-   * transport and without touching state — `selectContext()` does not even raise its `RangeError`;
+   * **The session stops answering.** It bumps the generation, empties the decision cache, marks
+   * itself closed and emits {@link AuthorizationState} `IDLE` — and only then drops the
+   * listeners. Afterwards `decide()` returns the empty list, so absent is `DENY` through
+   * `decisionFor`; `start()` resolves without calling the transport and without touching state;
    * `subscribe()` registers nothing; and `getState()` is `IDLE`.
-   *
-   * **It does not close the injected signal**: the consumer created that channel and closes it.
    *
    * ⚠️ **It cannot cancel a call already in flight** — this package never owned that `fetch`. What
    * it guarantees is that the answer is thrown away: the generation bump condemns it and nothing it
@@ -189,14 +130,7 @@ export interface AuthorizationSession {
 export function createAuthorizationSession(
   options: AuthorizationSessionOptions,
 ): AuthorizationSession {
-  const {
-    app,
-    transport,
-    maxPairsPerRequest,
-    maxCachedDecisions = 5000,
-    contextStore,
-    contextSignal,
-  } = options;
+  const { app, transport, maxPairsPerRequest, maxCachedDecisions = 5000 } = options;
 
   if (!Number.isInteger(maxCachedDecisions) || maxCachedDecisions < 1) {
     throw new RangeError(
@@ -207,81 +141,41 @@ export function createAuthorizationSession(
   }
 
   let state: AuthorizationState = { status: "IDLE" };
-  let contexts: readonly AuthorizationContext[] = [];
-  let activeContextId: string | undefined;
 
   /**
-   * Incremented on every context selection, and compared when a call resolves.
+   * THE SUPERSESSION PROTOCOL OF THIS FILE, stated as a rule rather than as a note on one line.
    *
-   * This is what drops a late answer. A permissions response for context A that arrives
-   * after the subject switched to B must not paint A's menu over B's — the consumer would
-   * be looking at a menu that belongs to a context it is not in, with no way to tell.
+   * **Every `await` that can be superseded is followed by a generation re-check before any
+   * observable action. A suspension point followed by nothing needs none.** "Observable" means
+   * emitting a state, writing the cache, or returning a value a caller will act on.
    *
-   * A counter and not a timestamp: two selections within the same clock tick are
-   * indistinguishable by time, and a clock that steps backwards makes the comparison lie.
+   * The rule is stated as a shape because describing the symptom instead is how one instance
+   * stayed missing for a long time. The table below is the inventory, and a new `await` in this
+   * file is a new row in it.
+   *
+   *   suspension point                         superseded by            re-check
+   *   ---------------------------------------  -----------------------  -----------------------
+   *   start: await transport.fetchPermissions   a later start, close()   yes, on BOTH the
+   *                                                                      resolved and the
+   *                                                                      rejected path
+   *   decide: await Promise.allSettled(...)     a later start, close()   yes, before merging,
+   *                                                                      caching or returning
+   *
+   * Two supersessions remain in a package with no contexts, and neither is hypothetical:
+   * **two overlapping `start()` calls**, and **`close()` landing during a `start()` in flight.**
+   *
+   * A counter and not a timestamp: two calls within the same clock tick are indistinguishable by
+   * time, and a clock that steps backwards makes the comparison lie.
    */
   let generation = 0;
 
   const listeners = new Set<(state: AuthorizationState) => void>();
 
-  /** `contextId` + `resourceType` + `action` + `resourceId` -> the decision. */
+  /** `resourceType` + `action` + `resourceId` -> the decision. */
   const decisionCache = new Map<string, Decision>();
 
-  /** Set by {@link close}. A notice arriving afterwards changes nothing. */
+  /** Set by {@link close}. */
   let closed = false;
-
-  /**
-   * Every call into either port goes through one of these four.
-   *
-   * **Neither port is allowed to take the session down.** A store throws in a private window and
-   * when a quota is full; a channel throws once its document is discarded. A failure here degrades
-   * to the behaviour of not having the port at all, which is a working session without persistence
-   * — never a blacked-out one.
-   */
-  async function readStored(): Promise<string | null> {
-    if (contextStore === undefined) {
-      return null;
-    }
-    try {
-      // The call is INSIDE the try so a synchronous throw is caught too, not only a rejection.
-      return (await contextStore.read()) ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  async function writeStored(contextId: string): Promise<void> {
-    if (contextStore === undefined) {
-      return;
-    }
-    try {
-      await contextStore.write(contextId);
-    } catch {
-      // Ignored on purpose: the selection has already happened and is still valid.
-    }
-  }
-
-  async function clearStored(): Promise<void> {
-    if (contextStore === undefined) {
-      return;
-    }
-    try {
-      await contextStore.clear();
-    } catch {
-      // Ignored, same reason.
-    }
-  }
-
-  function announce(contextId: string): void {
-    if (contextSignal === undefined) {
-      return;
-    }
-    try {
-      contextSignal.announce(contextId);
-    } catch {
-      // Ignored: telling the other tabs is a courtesy, not part of selecting a context.
-    }
-  }
 
   /** Writes one decision, evicting the oldest first if the bound would be exceeded. */
   function cacheDecision(key: string, decision: Decision): void {
@@ -297,12 +191,10 @@ export function createAuthorizationSession(
   /**
    * Publish the state, and let no single listener stop the others from hearing it.
    *
-   * **Neither an injected port nor a subscribed listener may take the session down.** It is the
-   * same rule the four port wrappers above state, extended to the third thing a consumer hands in.
-   * A render bug in one component must not deny the notification to every other subscriber, and
-   * during `close()` it must not leave the session unclosable: an escaping throw there skipped the
-   * listener drop, the signal unsubscribe and the `closed` flag, so every later `close()` threw
-   * again and the session could never be closed at all.
+   * **A subscribed listener may not take the session down.** A render bug in one component must
+   * not deny the notification to every other subscriber, and during `close()` it must not leave
+   * the session unclosable: an escaping throw there skipped the listener drop and the `closed`
+   * flag, so every later `close()` threw again and the session could never be closed at all.
    *
    * **The try wraps each listener, not the loop** — a loop-level try would stop at the first
    * thrower and the listeners after it would still lose the emission.
@@ -322,177 +214,6 @@ export function createAuthorizationSession(
     return error instanceof AuthorizationTransportError ? error.kind : "UNAVAILABLE";
   }
 
-  /**
-   * Make `context` active and load its menu.
-   *
-   * Everything derived from the previous context is discarded **before** the new call
-   * starts, and the state goes to `LOADING` — never staying on the previous `READY`. A
-   * consumer that kept rendering the old menu while the new one loaded would be showing
-   * actions that belong to a context the subject already left.
-   */
-  async function activate(context: AuthorizationContext): Promise<number> {
-    generation += 1;
-    const issuedAt = generation;
-
-    activeContextId = context.contextId;
-    decisionCache.clear();
-
-    if (!context.hasAccess) {
-      // The menu is not fetched at all. Asking and inferring "no access" from an empty
-      // answer would confuse "this context does not open this app" with "this context
-      // opens it and may do nothing", which are different screens.
-      setState({ status: "NO_ACCESS_IN_APP", contextId: context.contextId });
-      return issuedAt;
-    }
-
-    setState({ status: "LOADING" });
-
-    let menu;
-    try {
-      menu = await transport.fetchPermissions(app, context.contextId);
-    } catch (error) {
-      if (issuedAt !== generation) {
-        return issuedAt;
-      }
-      // A failed fetch is never `READY` with an empty list: an empty menu is
-      // indistinguishable from "you legitimately may do nothing", and the consumer would
-      // render an empty screen instead of saying what happened.
-      if (kindOf(error) === "NO_ACCESS_IN_APP") {
-        setState({ status: "NO_ACCESS_IN_APP", contextId: context.contextId });
-      } else {
-        setState({ status: "UNAVAILABLE" });
-      }
-      return issuedAt;
-    }
-
-    if (issuedAt !== generation) {
-      return issuedAt;
-    }
-    // A menu labelled with another context is a broken answer. Rendering it under the
-    // requested label is exactly the confusion this state type exists to prevent, so it is
-    // not `READY` with someone else's permissions — it is `UNAVAILABLE`.
-    if (menu.contextId !== context.contextId || menu.app !== app) {
-      setState({ status: "UNAVAILABLE" });
-      return issuedAt;
-    }
-    // PERSISTED HERE AND NOWHERE ELSE: below the generation check, below the menu fetch and below
-    // the label validation, so the only context ever written is one this session actually reached
-    // READY under.
-    //
-    // Writing earlier — before the `hasAccess` branch, as this did until 003b — had three costs the
-    // audit measured. A no-access context was written although the restore rule is guaranteed to
-    // discard and clear it. A context whose menu fetch failed was persisted, so the subject landed
-    // on UNAVAILABLE — a screen that carries no context list and offers no way out — reloaded to
-    // escape, and was restored straight back into it, with the picker unreachable for the whole
-    // outage. And a store whose `write()` hangs parked `selectContext()` with the picker still on
-    // screen, before LOADING, so no spinner was even possible.
-    //
-    // Two accepted consequences. A selection superseded DURING THE MENU FETCH no longer writes,
-    // because it returned at the check above: a context a superseded call chose has no business
-    // being the one restored next time.
-    //
-    // ⚠️ NARROWED IN 003d, because the broad version was measured false. A selection superseded
-    // during THE WRITE ITSELF does write — the write completes before the re-check below it, and
-    // it cannot be otherwise: not writing would require knowing a supersession that has not
-    // happened yet. It is acceptable for one reason and it is the same one the restore rule
-    // rests on: the stored id is A HINT, re-validated against the server's list at `start()`, so
-    // a stale write can cost a re-selection and never an access. Pinned by
-    // "a selection superseded DURING the write does write" in `context-sync.test.ts`.
-    //
-    // And a selection that ends in no-access or a failed menu LEAVES THE PREVIOUS VALUE in
-    // place — the store is not cleared on those paths. Restoring the last context that actually
-    // worked is safer and less surprising than restoring one the subject cannot use, and clearing
-    // would let one tab's failed attempt wipe a value every other tab is still using.
-    //
-    // AWAITED, and that is deliberate: a floating `void writeStored(...)` swallows the failure by
-    // accident rather than by design, and its rejection escapes as an unhandled one.
-    await writeStored(context.contextId);
-    // THE RE-CHECK THAT BELONGS TO EVERY SUSPENSION POINT IN THIS FILE, and the write is one:
-    // an injected store may be asynchronous, so `close()` and a cross-tab notice both land here.
-    // Without it a closed session published a menu, and a session already showing
-    // CONTEXT_CHANGED_ELSEWHERE was repainted READY under a context it had left — with its
-    // subscribers still attached, because that path never dropped them.
-    if (issuedAt !== generation) {
-      return issuedAt;
-    }
-    setState({
-      status: "READY",
-      contextId: context.contextId,
-      permissions: menu.permissions,
-    });
-    return issuedAt;
-  }
-
-  /**
-   * A notice arrived from another tab.
-   *
-   * **The state change and the invalidation happen in the same step, before the state is emitted.**
-   * The generation is bumped, the decision cache is cleared and the active context is dropped — so
-   * by the time a subscriber sees `CONTEXT_CHANGED_ELSEWHERE`, the session is already refusing to
-   * answer and anything still in flight is already condemned by the generation check. Emitting
-   * first would leave a window in which a consumer re-rendering on the new state could still be
-   * served a `PERMIT` from the old context's cache.
-   */
-  function onNotice(incoming: string): void {
-    if (closed) {
-      // DELIBERATELY REDUNDANT — one of SEVEN in this file. The other six: the `IDLE` guard and
-      // the `previous === undefined` guard below, `start()`'s cache clear, `subscribe`'s `closed`
-      // branch, and inside `close()` its idempotence guard and its `decisionCache.clear()`.
-      //
-      // 📐 WHICH GUARD ACTUALLY SUBSUMES THIS ONE, corrected in 003d and measured rather than
-      // reasoned: THE `IDLE` GUARD, not `previous === undefined`. With this branch disabled, a
-      // notice on a closed session is caught by `state.status === "IDLE"` — `close()` emits IDLE —
-      // and control never reaches the guard below. The old comment credited the wrong one; the
-      // declaration of redundancy was right, the mechanism named was not.
-      //
-      // It stays because "a closed session ignores notices" is the rule a reader comes here to
-      // find, and because a channel that keeps delivering after `close()` is a real shape: the
-      // consumer owns that channel and may not have closed it.
-      return;
-    }
-    // Some channels echo to their own sender, and two tabs can legitimately select the same
-    // context. Neither is a change.
-    if (incoming === activeContextId) {
-      return;
-    }
-    if (state.status === "IDLE") {
-      // Nothing to invalidate, and the store already holds the new value, so the next start()
-      // restores it.
-      //
-      // DELIBERATELY REDUNDANT, and not dead code — the same shape, and the same reasoning, as the
-      // cache clear in `start()`. An IDLE session has no `activeContextId`, so the guard below
-      // returns anyway and no test can distinguish the two. It stays because it states the rule
-      // where a reader looks for it, and because the guard below is about a different question.
-      return;
-    }
-    const previous = activeContextId;
-    if (previous === undefined) {
-      // Started but not in a context — CHOOSING_CONTEXT, or a start() still in flight. There is
-      // nothing being answered and no previous context to name, and replacing a usable picker with
-      // a banner would take away the only way forward. See the deviation section of the report.
-      return;
-    }
-
-    generation += 1;
-    decisionCache.clear();
-    activeContextId = undefined;
-    setState({
-      status: "CONTEXT_CHANGED_ELSEWHERE",
-      contextId: incoming,
-      previousContextId: previous,
-    });
-  }
-
-  let unsubscribeFromSignal: (() => void) | undefined;
-  if (contextSignal !== undefined) {
-    try {
-      unsubscribeFromSignal = contextSignal.subscribe(onNotice);
-    } catch {
-      // A signal that cannot even be subscribed to leaves the session working without it.
-      unsubscribeFromSignal = undefined;
-    }
-  }
-
   return {
     getState() {
       return state;
@@ -502,26 +223,11 @@ export function createAuthorizationSession(
       if (closed) {
         // Registers nothing, and the returned function is still safe to call.
         //
-        // ⚠️ THE STATUS OF THIS BRANCH DEPENDS ON `close()`, and 003d measured all three states
-        // rather than declaring one. It used to say "unobservable"; the audit said "load-bearing
-        // behaviour"; both are right about a different version of `close()`.
-        //
-        // 📐 Measured, one test — "a listener subscribed after close() receives nothing" — under
-        // three configurations:
-        //
-        //   `closed` set BEFORE the emission (as it is now), branch removed  -> GREEN
-        //   `closed` set AFTER  the emission (as it was),  branch removed    -> RED
-        //   the shipped tree                                                 -> GREEN
-        //
-        // So the branch was load-bearing BEHAVIOUR only through the door MAJOR-A opened: a listener
-        // re-entering `start()` from the final IDLE emission resurrected the session, and a late
-        // subscriber then received its live state. Moving the flag above that emission closed that
-        // door, AND THAT SUBSUMES THIS BRANCH — it is a bound again, and now genuinely one.
-        //
-        // It stays, and not out of caution: what it bounds is real — a consumer that keeps
-        // subscribing to a session it forgot to drop would otherwise accumulate one entry per call,
-        // forever — and the test above pins the rule where a reader looks for it, whichever of the
-        // two mechanisms is holding it up.
+        // DELIBERATELY REDUNDANT — member 3 of the family listed on `close()`, and measured so:
+        // nothing can change the state of a closed session, so a listener registered here would
+        // never fire either way, and removing this branch leaves the whole suite green, both ways.
+        // What it bounds is real: a consumer that keeps subscribing to a session it forgot to drop
+        // would otherwise accumulate one entry per call, forever.
         return () => {};
       }
       listeners.add(listener);
@@ -531,16 +237,11 @@ export function createAuthorizationSession(
     },
 
     /**
-     * List the contexts and, if there is exactly one, activate it.
+     * Load the menu and settle into a state.
      *
-     * **`start()` is a re-initialisation and behaves like one.** It joins the same generation
-     * protocol as {@link activate}: a session that is re-listing its contexts is not in a
-     * context, so the active context and the decision cache are dropped on entry, and a call
-     * that resolves after a later one has superseded it returns without touching state — and,
-     * when it was superseded during the menu fetch, without writing either. See `activate`'s
-     * persistence comment for the one window where a superseded selection does write.
-     * Without this, a second `start()` repainted over a live `READY` while `activeContextId`
-     * and the cache stayed on the old context.
+     * **`start()` is a re-initialisation and behaves like one.** A second call bumps the
+     * generation, so the first one returns without touching state when it resolves late. Without
+     * that, a slow first call repainted over the second one's result.
      */
     async start() {
       if (closed) {
@@ -552,222 +253,132 @@ export function createAuthorizationSession(
       generation += 1;
       const issuedAt = generation;
 
-      // Not in a context any more. Answering `decide` from the previous context's cache
-      // while its contexts are being re-listed is answering for a context we left.
-      activeContextId = undefined;
-      // DELIBERATELY REDUNDANT, and not dead code. With `activeContextId` cleared on the line
-      // above, `decide` returns before it ever reads the cache, and every path that sets a
-      // context again goes through `activate`, which clears too — so no test can reach a state
-      // where removing this line changes an answer, and the audit proved exactly that. It stays
-      // because this cache gates authorization: one line of defence in depth is cheaper than
-      // the reasoning needed to be sure the other two hold after the next change.
+      // LOAD-BEARING, and it did not use to be. Until this package lost its context concept the
+      // active context was dropped here too, which made `decide` return before it ever read the
+      // cache — so clearing was defence in depth. With no context to drop, THIS LINE IS THE ONLY
+      // THING that invalidates the cache across a re-start: neutralise it and "a re-start clears
+      // the cache" goes red. Measured, not assumed. It is not in the family on `close()`.
       decisionCache.clear();
       setState({ status: "LOADING" });
 
-      let available: readonly AuthorizationContext[];
+      let menu;
       try {
-        available = await transport.listContexts(app);
-      } catch {
+        menu = await transport.fetchPermissions(app);
+      } catch (error) {
         if (issuedAt !== generation) {
           return;
         }
+        // A failed fetch is never `READY` with an empty list: an empty menu is
+        // indistinguishable from "you legitimately may do nothing", and the consumer would
+        // render an empty screen instead of saying what happened.
+        if (kindOf(error) === "NO_ACCESS_IN_APP") {
+          setState({ status: "NO_ACCESS_IN_APP" });
+        } else {
+          setState({ status: "UNAVAILABLE" });
+        }
+        return;
+      }
+
+      if (issuedAt !== generation) {
+        return;
+      }
+      // A menu labelled with another application is a broken answer. Rendering it under the
+      // requested label is exactly the confusion this state type exists to prevent, so it is
+      // not `READY` with someone else's permissions — it is `UNAVAILABLE`.
+      if (menu.app !== app) {
         setState({ status: "UNAVAILABLE" });
         return;
       }
-
-      if (issuedAt !== generation) {
-        return;
-      }
-
-      contexts = available;
-
-      if (available.length === 0) {
-        setState({ status: "NO_CONTEXTS" });
-        return;
-      }
-      const only = available[0];
-      if (available.length === 1 && only !== undefined) {
-        // One context is not a choice. Showing a picker with a single option asks the
-        // subject to confirm something that has no alternative. This wins regardless of what
-        // the store says: activating the only context there is produces the same outcome.
-        await activate(only);
-        return;
-      }
-
-      const stored = await readStored();
-      if (issuedAt !== generation) {
-        // A later start() or selectContext() superseded this one while the read was in flight.
-        return;
-      }
-      if (stored !== null) {
-        const match = available.find((c) => c.contextId === stored);
-        // THE SECURITY RULE OF THIS FILE. A stored id is a HINT about which of the server's
-        // contexts to prefer. It is NEVER a claim that the subject holds that context, so it is
-        // only honoured when the list the decision point just returned contains it. An id that is
-        // not in the list — an arrangement that ended, another application's value, one edited by
-        // hand — is discarded, not asked about.
-        //
-        // `hasAccess === false` is a discard too, and for a different reason: restoring into
-        // NO_ACCESS_IN_APP puts the subject on a screen that carries no context list and therefore
-        // offers no way out. The picker is shown instead; picking it by hand still lands there,
-        // with the whole explanation, which is today's behaviour and stays.
-        if (match !== undefined && match.hasAccess) {
-          await activate(match);
-          return;
-        }
-        await clearStored();
-        if (issuedAt !== generation) {
-          return;
-        }
-      }
-      setState({ status: "CHOOSING_CONTEXT", contexts: available });
-    },
-
-    async selectContext(contextId) {
-      if (closed) {
-        // Inert means inert: not even the RangeError an unknown id would raise. Same reason as
-        // `start()`.
-        return;
-      }
-      const context = contexts.find((c) => c.contextId === contextId);
-      if (context === undefined) {
-        throw new RangeError(`unknown contextId: ${contextId}`);
-      }
-      // Read BEFORE activate, which overwrites it.
-      const previous = activeContextId;
-      const issuedAt = await activate(context);
-      // THE RE-CHECK THAT BELONGS TO EVERY SUSPENSION POINT IN THIS FILE. `await activate(...)`
-      // is one, and until 003d it was the only one without it — which is why three rounds
-      // described the symptom as "a closed session still announces" and none of them found it.
-      //
-      // The predicate is the GENERATION and not `closed`, and that choice is the fix:
-      //
-      // - `closed` is the right place with the wrong predicate. It closes the `close()` case and
-      //   leaves the one that costs more: a LIVE session, superseded by a cross-tab notice, still
-      //   announces the context it was selecting. Measured, it evicts the tab that legitimately
-      //   won — that tab is knocked out of a context it had just correctly selected, and every tab
-      //   is left naming a context NO TAB IS IN.
-      // - Inside `announce` would be worse still: those four port wrappers have exactly one job —
-      //   neither an injected port nor a subscribed listener may take the session down — and
-      //   putting policy in one of them turns a wrapper into a decision point.
-      // - The generation closes both for the reason every other suspension point in this file
-      //   already obeys: A SUPERSEDED CALL MUST NOT SPEAK. `close()` bumps it, a notice bumps it,
-      //   a later `start()` or `selectContext()` bumps it. One predicate, four supersessions.
-      //
-      // `activate` RETURNS its own `issuedAt` rather than the call site computing `generation + 1`:
-      // that would reach into `activate` for the knowledge that it bumps exactly once on entry, and
-      // no other re-check in this file knows anything about another function's internals.
-      //
-      // And it returns it on EVERY path, including the early ones. The question here is "was I
-      // superseded", NOT "did I reach READY": a selection that ends in no-access or unavailable
-      // MUST still announce, because the subject did switch and any tab that kept answering would
-      // be painting permits the backend will refuse.
-      if (issuedAt !== generation) {
-        return;
-      }
-      // Announced from here and from nowhere else, and only on a real change.
-      //
-      // Not from the restore path: a tab that just reloaded has not changed anything, and
-      // announcing would make every other tab display a change that never happened. Not from the
-      // single-context auto-activation, for the same reason. Not on re-selecting the context that
-      // is already active — that is not a change, and waking every other tab for it is how a
-      // banner appears for no reason.
-      if (previous !== context.contextId) {
-        announce(context.contextId);
-      }
+      setState({ status: "READY", permissions: menu.permissions });
     },
 
     close() {
       if (closed) {
         return;
       }
-      // Idempotence is stated by that guard rather than emerging from the steps below. It is
-      // DELIBERATELY REDUNDANT, and it is the one the count used to miss — the family is SEVEN,
-      // not six; the list is in `onNotice`. A second pass would find the listeners already
-      // cleared and `unsubscribeFromSignal` already undefined, so nothing observable happens
-      // either way — but "calling it twice is not an error" is a promise, and a promise held by
-      // accident is one the next edit breaks.
+      // Idempotence is stated by that guard rather than emerging from the steps below.
       //
-      // ORDER MATTERS, and one step of it is the whole point.
+      // ⚠️ THE DELIBERATELY-REDUNDANT FAMILY OF THIS FILE, and it is a map rather than a list of
+      // labels: EVERY CANDIDATE WAS NEUTRALISED AND THE SUITE RE-RUN, so membership is measured
+      // and not asserted. A line that is here is defence in depth — removing it turns nothing red.
       //
-      // 1-3 make the session stop answering: the generation bump condemns anything in flight, the
-      // cache is emptied and the active context is dropped, so `decide` returns [] and absent is
-      // DENY through `decisionFor`.
+      // ⚠️ WHAT THIS LIST DOES **NOT** SAY, and it used to: it is not a claim that everything
+      // absent from it is load-bearing and has a test. That sentence was here, it was false, and
+      // the instrument that built this very list disproved it — three neutralisations in this file
+      // were green and none of them was listed. Two of them were plain gaps and now have tests
+      // (`pairsOf` iterating every action; the collapse being stable on a rank tie); the third was
+      // genuinely redundant and joins the family below.
+      //
+      // Absence from this list means "not measured as redundant". It does not mean "covered".
+      //
+      // The family is FOUR:
+      //
+      //   1. `decisionCache.clear()` in this method
+      //   2. `listeners.clear()` in this method
+      //   3. the `closed` branch in `subscribe`
+      //   4. `wanted.length > 0` in the cache short-circuit of `decide` — with an empty request
+      //      the loop never runs, so the flag stays true and returns the empty array; without it
+      //      the request splits into zero chunks and returns the empty array too, with no
+      //      transport call on either path
+      //
+      // ⚠️ AND THIS GUARD IS NOT ONE OF THEM ANY MORE. It was redundant while nothing re-entered
+      // `close()`; neutralise it now and "a listener that re-enters close() from the final IDLE
+      // does not recurse" goes red with **2298 emissions** before the stack runs out. Idempotence
+      // is behaviour here, not a promise held by accident.
+      //
+      // `decisionCache.clear()` in `start()` left this family too, and for a reason worth knowing:
+      // it was redundant only because dropping the active context made `decide` return before it
+      // ever read the cache. With no context to drop, that other gate is gone and the clear is now
+      // the only thing invalidating the cache across a re-start.
+      //
+      // No absolute suite count is quoted anywhere in this file, and that is deliberate: a number
+      // in a comment goes stale the next time a test is added, and it did, repeatedly. The
+      // invariant is "the whole suite, both ways" and it does not rot.
+      //
+      // ORDER MATTERS, and two steps of it are the whole point.
+      //
+      // 1-2 make the session stop answering: the generation bump condemns anything in flight and
+      // the cache is emptied, so `decide` returns [] and absent is DENY through `decisionFor`.
       generation += 1;
-      // DELIBERATELY REDUNDANT, one of the seven — see the list in `onNotice`. Dropping the active
-      // context on the
-      // line below makes `decide` return before it ever reads the cache, so emptying it changes
-      // no answer and no test can reach the difference — measured, not assumed. It stays because
-      // this cache gates authorization: one line of defence in depth is cheaper than the
-      // reasoning needed to be sure the other two still hold after the next change.
       decisionCache.clear();
-      activeContextId = undefined;
 
-      // THE FLAG GOES HERE, BEFORE THE EMISSION, AND ITS POSITION IS THE POINT OF THIS STEP.
+      // THE FLAG GOES HERE, BEFORE THE EMISSION, AND ITS POSITION IS LOAD-BEARING.
       //
-      // It used to be set last, after the emission below, and that left a window with the shape of
-      // the leak this method exists to close. During the final emission `closed` was still false,
-      // so a listener that re-entered `start()` or `selectContext()` was served BY A SESSION THAT
-      // WAS CLOSING. Worse, it was served correctly: `close()` bumps the generation before the
-      // emission and nothing bumps it after, so the re-entrant call's own bump made it the newest
-      // generation and every re-check in this file waved it through.
+      // Set after the emission instead, `closed` is still false while the final `IDLE` is being
+      // delivered, so a listener that re-enters `start()` is served BY A SESSION THAT IS CLOSING
+      // — and served correctly, because `close()` bumps the generation before the emission and
+      // nothing bumps it after, so the re-entrant call's own bump makes it the newest generation
+      // and every re-check waves it through. Measured, that left a CLOSED session `READY` with a
+      // permission menu, the transport called after `close()`, and `decide()` answering `PERMIT`;
+      // and with a listener that re-entered `close()` itself, 2205 frames of recursion ending in
+      // a `RangeError`.
       //
-      // Measured on the shipped code: a listener calling `start()` on the final IDLE left the
-      // CLOSED session READY with a permission menu, the transport called AFTER `close()`, and
-      // `decide()` answering PERMIT. That is exactly the leak, arriving through the one call that
-      // was supposed to end it.
-      //
-      // Setting it here does NOT disturb the 4-before-5 ordering below: the emission still comes
-      // first, so a framework binding still gets its one render to clear the screen. What changes
-      // is only that the session stops ANSWERING during that render.
+      // It does not disturb the ordering below: the emission still comes first.
       closed = true;
 
-      // 4 BEFORE 5. Dropping the listeners first would mean nobody hears the transition, and THE
-      // PREVIOUS SUBJECT'S MENU STAYS PAINTED — which is the leak this exists to close. A framework
-      // binding needs this one last emission in order to re-render empty.
+      // EMISSION BEFORE THE LISTENER DROP, and that is the second load-bearing order. Dropping
+      // the listeners first would mean nobody hears the transition, and THE PREVIOUS SUBJECT'S
+      // MENU STAYS PAINTED — which is the leak this exists to close. A framework binding needs
+      // this one last emission in order to re-render empty.
       //
       // Why it matters: a different person signs in on the same browser and the token store is
       // shared across tabs, so the next refresh hands this tab a token for another subject. The
-      // backend refuses that tab's requests — no data crosses — but the menu already painted and the
-      // decisions already cached belong to the previous person. The new person does not see their
-      // records; they see their SILHOUETTE: which sections existed, which actions were available,
-      // whether that person was an administrator. In a package where the menu IS the permission,
-      // the silhouette says plenty.
+      // backend refuses that tab's requests — no data crosses — but the menu already painted and
+      // the decisions already cached belong to the previous person. The new person does not see
+      // their records; they see their SILHOUETTE: which sections existed, which actions were
+      // available, whether that person was an administrator. In a package where the menu IS the
+      // permission, the silhouette says plenty.
       setState({ status: "IDLE" });
-      // DELIBERATELY REDUNDANT AS BEHAVIOUR SINCE THE RE-CHECK IN `activate`, and load-bearing as
-      // a bound.
-      //
-      // The analogy this used to draw — "the same shape as the `closed` branch in `subscribe`" —
-      // survives 003d, but only after the fact and for a reason worth writing down: that branch WAS
-      // load-bearing behaviour while `closed` was set after the final emission, and stopped being
-      // so when the flag moved above it. 📐 Measured, three configurations, in that branch's own
-      // comment. Both lines are bounds again; neither was always one.
-      //
-      // It used to be observable, and that was the symptom of a defect rather than a feature: it
-      // was the only thing keeping a stray READY, published by an `activate` parked in its store
-      // write, out of a subscriber's render function. `activate` re-checks the generation now, so
-      // there is no stray emission left to absorb, and removing this line leaves the whole suite
-      // green — measured, 134/0 with the line and without it.
-      //
-      // What it still buys is a bound: a consumer that keeps subscribing to a session it never
-      // dropped would otherwise hold every listener, and through them every closure, alive for as
-      // long as it holds the session. No test can reach that, and inventing one that pretends to
-      // would be worse than saying so here.
-      listeners.clear();
 
-      if (unsubscribeFromSignal !== undefined) {
-        try {
-          unsubscribeFromSignal();
-        } catch {
-          // A signal whose document is gone can throw on the way out too. Reaching here with the
-          // listeners already dropped is why this cannot leak them.
-        }
-        unsubscribeFromSignal = undefined;
-      }
+      // Family member 3. What it buys is a bound: a consumer that keeps subscribing to a session
+      // it never dropped would otherwise hold every listener, and through them every closure,
+      // alive for as long as it holds the session. No test can reach that, and inventing one that
+      // pretends to would be worse than saying so here.
+      listeners.clear();
     },
 
     /**
-     * Instance-level decisions for the active context.
+     * Instance-level decisions.
      *
      * The request is split by {@link splitDecisionRequest} and every chunk is asked
      * **concurrently**. Chunks are independent and a sequential loop would make the whole
@@ -778,9 +389,6 @@ export function createAuthorizationSession(
      * through `decisionFor`. One failed chunk never fails the whole call and never turns
      * into a permit. Nothing from a failed chunk is cached either: a transient outage must
      * not leave a denial behind that outlives it.
-     *
-     * With no active context the answer is the empty list, by the same rule: every pair
-     * resolves to `DENY`.
      *
      * The cache is consulted only when it holds **every** pair requested. A partial hit
      * re-asks the whole request, because decomposing an arbitrary set of pairs back into
@@ -793,14 +401,13 @@ export function createAuthorizationSession(
      * cached.
      */
     async decide(request) {
-      const contextId = activeContextId;
-      if (contextId === undefined) {
+      // A session nobody started, or one that has been closed, answers nothing: every pair
+      // resolves to `DENY` through `decisionFor`.
+      if (state.status === "IDLE") {
         return [];
       }
-      // The package advertises that a context without access to this app is not asked about.
-      // That invariant has to hold for BOTH questions, not just the menu: `activeContextId`
-      // is set before `activate` branches, so without this the decision point is asked for a
-      // context we already know does not open the app.
+      // The package advertises that a subject without access to this app is not asked about.
+      // That invariant has to hold for BOTH questions, not just the menu.
       if (state.status === "NO_ACCESS_IN_APP") {
         return [];
       }
@@ -811,9 +418,7 @@ export function createAuthorizationSession(
       const cached: Decision[] = [];
       let allCached = wanted.length > 0;
       for (const { action, resourceId } of wanted) {
-        const hit = decisionCache.get(
-          cacheKey(contextId, request.resourceType, action, resourceId),
-        );
+        const hit = decisionCache.get(cacheKey(request.resourceType, action, resourceId));
         if (hit === undefined) {
           allCached = false;
           break;
@@ -826,11 +431,11 @@ export function createAuthorizationSession(
 
       const chunks = splitDecisionRequest(request, maxPairsPerRequest);
       const settled = await Promise.allSettled(
-        chunks.map((c) => transport.fetchDecisions(app, contextId, c)),
+        chunks.map((c) => transport.fetchDecisions(app, c)),
       );
 
-      // The context changed while the answers were in flight: they belong to a context the
-      // session is no longer in. Not merged, not cached, not returned.
+      // A later `start()` or a `close()` landed while the answers were in flight. Not merged,
+      // not cached, not returned.
       if (issuedAt !== generation) {
         return [];
       }
@@ -858,10 +463,9 @@ export function createAuthorizationSession(
           continue;
         }
         const answer = result.value;
-        // A response labelled with another context or another app is discarded WHOLE: not
-        // merged, not cached. The port declares these fields; reading them is the point of
-        // having declared them.
-        if (answer.contextId !== contextId || answer.app !== app) {
+        // A response labelled with another app is discarded WHOLE: not merged, not cached. The
+        // port declares that field; reading it is the point of having declared it.
+        if (answer.app !== app) {
           continue;
         }
         for (const decision of answer.decisions) {
@@ -880,26 +484,19 @@ export function createAuthorizationSession(
       for (const decision of byPair.values()) {
         merged.push(decision);
         cacheDecision(
-          cacheKey(contextId, request.resourceType, decision.action, decision.resourceId),
+          cacheKey(request.resourceType, decision.action, decision.resourceId),
           decision,
         );
       }
       // Discarding is silent and fail-closed: the pairs simply stay absent, and absent is
-      // DENY through `decisionFor`. There is no channel to report this on, and inventing one
-      // is not part of this round.
+      // DENY through `decisionFor`.
       return merged;
     },
   };
 }
 
 /**
- * The cache key, with the context **inside** it.
- *
- * Keeping the context beside the cache instead of in the key is how a menu from one context
- * gets served to another: the lookup succeeds because the pair matches, and nothing in the
- * key says which context it was computed under. Selecting a context also clears the cache
- * outright — the key protects reads, the clear protects memory, and neither substitutes for
- * the other.
+ * The cache key.
  *
  * **The encoding is injective, and that is a property of the encoding rather than of the
  * values.** Every part is emitted length-first (see {@link joinParts}), so no two distinct
@@ -909,13 +506,8 @@ export function createAuthorizationSession(
  * carrying the separator could forge another pair's key: satisfy the requested-pair check, be
  * returned, be cached, and then be served as a durable `PERMIT`.
  */
-function cacheKey(
-  contextId: string,
-  resourceType: string,
-  action: string,
-  resourceId: string,
-): string {
-  return joinParts(contextId, resourceType, action, resourceId);
+function cacheKey(resourceType: string, action: string, resourceId: string): string {
+  return joinParts(resourceType, action, resourceId);
 }
 
 /** The requested-pair key. Same encoding, same reason. */

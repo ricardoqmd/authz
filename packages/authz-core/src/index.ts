@@ -2,7 +2,6 @@ export type { DecisionEffect, PermissionEntry, Decision } from "./decision.js";
 export { isRenderable, decisionFor, permissionFor } from "./decision.js";
 
 export type {
-  AuthorizationContext,
   AuthorizationTransport,
   DecisionRequest,
   DecisionSet,
@@ -19,5 +18,3 @@ export type {
   AuthorizationState,
 } from "./session.js";
 export { createAuthorizationSession } from "./session.js";
-
-export type { ContextSignal, ContextStore } from "./context-sync.js";

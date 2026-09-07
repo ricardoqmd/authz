@@ -28,3 +28,98 @@ pnpm typecheck
 1. Branch from `main` (`feat/`, `fix/`, `chore/`, `docs/`, `refactor/`).
 2. Add a changeset: `pnpm changeset`.
 3. Open a pull request using the template. CI must be green.
+
+## Release checklist
+
+1. Collapse the pending changesets into one that describes the release (see below).
+2. **When the core's new version falls outside the range, bump it by hand. While the core is `0.x`,
+   that is every minor.** The range is the literal peer range in `packages/authz-http/package.json`.
+3. Run the version step on a copy and read its output (see below).
+4. Only then release.
+
+## Before a release: run the version step on a copy and read its output
+
+**Always, and before every release:**
+
+```bash
+cp -R . /tmp/release-check && cd /tmp/release-check
+npx changeset version
+git --no-pager diff --stat        # which versions actually came out, and what the notes say
+```
+
+Then throw the copy away.
+
+Two things need reading, and neither is visible from the changeset files alone.
+
+**The version numbers.** A `minor` in a changeset is not a promise about the number that comes out.
+Changesets applies a **major** to a package whose *peer* dependency was bumped out of range, so a
+package declaring `"@ricardoqmd/authz-core": "workspace:^"` under `peerDependencies` goes to `1.0.0`
+from two `minor` changesets and nothing in either file says so.
+
+**What decides it is the range, not the fact that it is a peer.** `workspace:^` and `workspace:*`
+resolve against the version the core has *right now*, so bumping the core takes them out of range and
+the major follows. A **literal** range already covers the version about to be published, stays in
+range, and no major happens. Measured, all four combinations **at the first release** — the one that
+takes both packages from `0.0.0` to `0.1.0`:
+
+| peer range | experimental flag | `authz-http` comes out |
+|---|---|---|
+| `workspace:^` | either | `1.0.0` |
+| `workspace:*` | either | `1.0.0` |
+| `^0.1.0` | either | `0.1.0` |
+| `>=0.1.0` | either | `0.1.0` |
+
+⚠️ **That table measured the first release and says nothing about any other.** Measured again at the
+**second** — a core-only `minor`, with the published range left alone — the experimental flag stops
+being irrelevant and becomes the only thing separating the two outcomes:
+
+| peer range | experimental flag | core | `authz-http` comes out | peer range afterwards |
+|---|---|---|---|---|
+| `^0.1.0` | off | `0.2.0` | `1.0.0` | `^0.2.0` |
+| `^0.1.0` | on | `0.2.0` | `1.0.0` | `^0.2.0` |
+| `>=0.1.0` | off | `0.2.0` | `1.0.0` | `>=0.2.0` |
+| `>=0.1.0` | on | `0.2.0` | `0.1.0` | `>=0.1.0` |
+
+That is why this repository declares `"@ricardoqmd/authz-core": "^0.1.0"`. It publishes the same range
+`workspace:^` would have published, and keeps the dependency a peer — a consumer must not end up with
+two copies of the core's types. The experimental flag changes nothing for it at either release, which
+is why what keeps this range true is the checklist item below and not an option.
+
+**A configuration that survives repeated releases exists, and it must not be used. It survives by
+ceasing to maintain the range — and a range that is not maintained lies.** A literal range on a `0.x`
+package covers only its minor line; that is semver, and no option changes it without breaking
+something else. The checklist item is the correct mechanism, because the alternative publishes a
+compatibility claim nobody verified.
+
+That is measured and not argued. The surviving row is the last one above, and taking the same
+configuration through a core **major** is what disqualifies it:
+
+| peer range | experimental flag | core | `authz-http` comes out | peer range afterwards |
+|---|---|---|---|---|
+| `>=0.1.0` | on | `1.0.0` | `0.1.0` | `>=0.1.0` |
+
+`authz-http@0.1.0` reaches the registry declaring it works with `>=0.1.0` of a core that has just
+broken compatibility, and a consumer installing the pair gets no peer warning at all — and that
+warning is the one thing a peer range exists to produce. The range survived by no longer describing
+anything. The option that buys this is called
+`___experimentalUnsafeOptions_WILL_CHANGE_IN_PATCH`.
+
+⚠️ **Its one real cost, and it is a checklist item:** a literal range does **not** follow the core by
+itself. **When the core's new version falls outside the range, bump it by hand. While the core is
+`0.x`, that is every minor.** The range lives in `packages/authz-http/package.json`; `workspace:^` did
+that automatically, and this does not. `ROADMAP.md` schedules `v0.2.0` as the next release, which is
+exactly the minor that fires this item.
+
+You will also see `changeset version` print `must depend on the current version of
+"@ricardoqmd/authz-core": "0.0.0" vs "^0.1.0"` while the working tree still holds the pre-release
+numbers. That is the range naming the version about to be published rather than the one on disk; it
+resolves the moment the bump lands, and `install`, `build` and `test` are green on both sides of it.
+
+**The release notes.** The notes are assembled from every pending changeset, so a feature added and
+removed across several unpublished rounds is announced twice — once as an addition and once as a
+removal — with no way for a reader to tell which sentence describes the code they installed. A
+changelog declares what changed **between two published versions**, not what happened in the working
+tree. Collapse the pending changesets before releasing, and describe what the release *is*.
+
+Neither defect is reachable by tests, types or coverage: they live in the release tooling. Running
+the command is the only way to see them.

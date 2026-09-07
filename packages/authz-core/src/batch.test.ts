@@ -45,7 +45,7 @@ describe("splitDecisionRequest", () => {
   });
 
   /**
-   * The assertion the prompt singles out, and it is two assertions on purpose: a splitter
+   * The load-bearing assertion here, and it is two assertions on purpose: a splitter
    * that silently dropped pairs would satisfy the cap perfectly.
    */
   it("splits 50 resources by 3 actions under a cap of 100 within the cap AND without losing a pair", () => {
@@ -127,7 +127,7 @@ describe("splitDecisionRequest", () => {
 });
 
 /**
- * authz-001b — MINOR I. A fractional cap passed `Number.isFinite` and then made the `slice`
+ * A fractional cap passed `Number.isFinite` and then made the `slice`
  * truncation in the actions-exceed-the-cap branch produce a chunk one pair over the cap: the
  * guard admitted a value the algorithm below it cannot honour.
  */

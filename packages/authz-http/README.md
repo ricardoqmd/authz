@@ -4,7 +4,7 @@ A reference `AuthorizationTransport` over `fetch`, for
 [`@ricardoqmd/authz-core`](https://github.com/ricardoqmd/authz/tree/main/packages/authz-core).
 
 One function. It does not manage state, does not cache and does not decide anything — the core does
-all of that. This turns the core's port into three HTTP calls, and enforces one contract on the
+all of that. This turns the core's two-method port into two HTTP calls, and enforces one contract on the
 answers.
 
 ```bash
@@ -20,7 +20,6 @@ const session = createAuthorizationSession({
   maxPairsPerRequest: 200,
   transport: createHttpTransport({
     baseUrl: "https://api.example.com",
-    contextHeader: "X-Context-Id",
     getToken: () => auth.accessToken ?? null,
   }),
 });
@@ -28,35 +27,54 @@ const session = createAuthorizationSession({
 
 ## The contract it enforces on your backend
 
-**Every answer must echo the `app` and the `contextId` it was asked about**, and this adapter
-**rejects loudly when it does not** — with a message naming the missing field and the route.
+**Every answer must echo the `app` it was asked about**, and this adapter reads it from the body and
+rejects when it is missing. The core discards an answer whose `app` does not match, **silently and
+fail-closed** — which is right, because an answer about another application is worse than no answer,
+but it means an adapter that cast a body without that field would produce a fully denied application
+with no error state anywhere. Failing here is a message a developer reads; failing there is a screen
+a user cannot explain.
 
-That strictness is the entire reason this package exists, so it is worth being explicit about why.
-The core discards an answer whose `app` or `contextId` does not match what it asked, **silently and
-fail-closed** — which is right, because an answer about a context the subject is not in is worse than
-no answer at all. But it means an adapter that never populates those fields produces a **fully denied
-application with no error state anywhere**: every menu `UNAVAILABLE`, every decision `DENY`, and
-nothing to explain it, because from the core's point of view nothing went wrong. It asked, and it got
-answers about something else.
+It is read from the body and **not filled in from what was asked**: doing that would make the core's
+guard tautological.
 
-So this adapter fails at the edge, where the failure is a message a developer reads, instead of
-quietly at the core, where it would be a screen a user cannot explain.
+The permissions answer needs a `permissions` array and the decisions answer a `decisions` array.
 
-It also **reads those fields from the response body** and never fills them in from what it asked.
-Copying the request's own values would make the core's guard tautological, and a backend answering
-for the wrong context would go unnoticed — which is the exact failure this is here to surface.
+| Method | Route |
+|---|---|
+| `fetchPermissions(app)` | `GET {baseUrl}/me/apps/{app}/permissions` |
+| `fetchDecisions(app, request)` | `POST {baseUrl}/me/apps/{app}/decisions` |
 
-The same applies to the payloads. A menu needs a `permissions` array, a decision set needs a
-`decisions` array, and the contexts call needs a top-level array whose elements carry `contextId`,
-`label` and a boolean `hasAccess`. Anything else rejects. **The package never guesses a shape.**
+## The authorization context is optional, and there are exactly three modes
 
-## The three routes
+The core has no context concept. If your deployment has one, this adapter carries it — and checks
+that the answer is about it.
 
-| Call | Method and path | Context header |
+| `contextId` | `contextHeader` | What happens |
 |---|---|---|
-| `listContexts(app)` | `GET {baseUrl}/me/apps/{app}/contracts` | no — this is the call that asks which contexts exist |
-| `fetchPermissions(app, contextId)` | `GET {baseUrl}/me/apps/{app}/permissions` | yes |
-| `fetchDecisions(app, contextId, request)` | `POST {baseUrl}/me/apps/{app}/decisions` | yes |
+| absent | absent | **No header is sent and no echo is required.** A backend that has never heard of contexts works unchanged. This is the default. |
+| present | present | The header carries the id, and **an answer whose `contextId` does not echo it is rejected loudly** — as is one that omits the field. |
+| one of the two | the other missing | **`RangeError` at construction**, naming which is missing. |
+
+```ts
+createHttpTransport({
+  baseUrl: "https://api.example.com",
+  getToken: () => auth.accessToken ?? null,
+  // Optional, and only as a pair:
+  contextId: currentContextId,
+  contextHeader: "X-Context-Id",
+});
+```
+
+A header name with nothing to put in it, or an id with nowhere to send it, is a configuration
+mistake. Rejecting it at construction costs one line; discovering it as a `401` in an environment
+costs an afternoon.
+
+⚠️ Two preconditions on `contextId`, because the symptom of breaking either is an opaque failure
+rather than a message: it is sent **as a header value**, so it must be a valid one; and **leading or
+trailing whitespace is not preserved** — the platform trims it on the wire, silently.
+
+The rejection follows the same message discipline as every other one here: **the route and the field,
+never the body, never the token, never the header value.**
 
 Every path segment is percent-encoded, so an identifier containing `/` or `?` cannot escape its
 segment.
@@ -65,8 +83,9 @@ segment.
 
 | Field | |
 |---|---|
-| `baseUrl` | Where the three routes hang from. A trailing slash is fine. |
-| `contextHeader` | The header the `contextId` travels in. **Configuration, never a constant** — this package does not know what your deployment calls its authorization context. |
+| `baseUrl` | Where the two routes hang from. A trailing slash is fine. |
+| `contextId` | Optional. The authorization context to send and require an echo of. See the three modes above. |
+| `contextHeader` | Required only when `contextId` is given. **Configuration, never a constant** — this package does not know what your deployment calls its authorization context. |
 | `getToken` | Sync or async. Returning `null` omits the `Authorization` header **entirely**; an empty one is a different statement to a backend, and not the one we mean. |
 | `fetch` | Optional; defaults to the global. Injectable so you can wrap it — retries, tracing, your own tests — without this package having an opinion about any of it. |
 | `classifyError` | Optional. See below. |
