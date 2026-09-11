@@ -1,0 +1,51 @@
+{
+  "name": "@ricardoqmd/authz-context",
+  "version": "0.0.0",
+  "description": "The authorization context a subject works under: listing, choosing, and one permissions session per context",
+  "keywords": [
+    "authorization",
+    "authz",
+    "context",
+    "multi-tenant",
+    "permissions",
+    "session"
+  ],
+  "author": "ricardoqmd",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ricardoqmd/authz.git",
+    "directory": "packages/authz-context"
+  },
+  "homepage": "https://github.com/ricardoqmd/authz/tree/main/packages/authz-context",
+  "bugs": "https://github.com/ricardoqmd/authz/issues",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@ricardoqmd/authz-core": "^0.1.0"
+  },
+  "devDependencies": {
+    "@ricardoqmd/authz-core": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}

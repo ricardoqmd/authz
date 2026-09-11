@@ -33,7 +33,9 @@ pnpm typecheck
 
 1. Collapse the pending changesets into one that describes the release (see below).
 2. **When the core's new version falls outside the range, bump it by hand. While the core is `0.x`,
-   that is every minor.** The range is the literal peer range in `packages/authz-http/package.json`.
+   that is every minor.** The range is the literal peer range, and there are now **two** files that
+   carry one: `packages/authz-http/package.json` and `packages/authz-context/package.json`. Both, or
+   the one you forget publishes a compatibility claim nobody verified.
 3. Run the version step on a copy and read its output (see below).
 4. Only then release.
 
