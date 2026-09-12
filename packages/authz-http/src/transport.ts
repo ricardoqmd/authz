@@ -63,6 +63,94 @@ export interface HttpTransportConfig {
    * them.
    */
   readonly classifyError?: (status: number, body: unknown) => TransportErrorKind | undefined;
+  /**
+   * Where the two routes live, **optional**. Omit it and you get the defaults, which are the only
+   * paths this package used to know:
+   *
+   * ```
+   * permissions  (encodedApp) => `/me/apps/${encodedApp}/permissions`
+   * decisions    (encodedApp) => `/me/apps/${encodedApp}/decisions`
+   * ```
+   *
+   * Either entry may be given on its own; the other keeps its default.
+   *
+   * <h3>`encodedApp` arrives PERCENT-ENCODED, and that is the whole point of the parameter's name</h3>
+   *
+   * **Interpolate it and nothing else.** The package encodes the application id with
+   * `encodeURIComponent` before your function sees it, so an id containing `/` or `?` cannot escape
+   * its segment and reach a route nobody meant to call. Had the raw id been passed instead, that
+   * guarantee would have moved to you silently, and forgetting to encode is the ordinary mistake.
+   *
+   * **Do not encode it again.** ⚠️ **For an ordinary id it changes nothing**:
+   * `encodeURIComponent("app-a")` is `"app-a"` and encoding it twice is still `"app-a"`, so a
+   * suite whose ids are all ordinary never sees the mistake. For an id with a `/`, a space or an
+   * accent it produces `%252F`, `%2520` or `%25C3%25B1` and a route your backend does not
+   * recognise — **and nothing announces that either.** Through a session a double-encoded
+   * `permissions` path shows `UNAVAILABLE`, or `NO_ACCESS_IN_APP` from a backend that answers `403`
+   * for an application it does not know; a double-encoded `decisions` path shows `READY` with every
+   * decision denied. Nothing is printed in any of those cases.
+   *
+   * <h3>What is rejected, and when</h3>
+   *
+   * The returned path must be a non-empty string beginning with `/`; it is joined to
+   * {@link baseUrl} verbatim. A path without the leading slash produces a wrong URL, and this package
+   * will not build one silently:
+   *
+   * - **At construction**, each function given is called ONCE with the probe id `"probe"`, before any
+   *   request is made — so a path function with side effects will see that call. If it returns a string
+   *   that does not begin with `/`, the constructor throws a `RangeError` — the same place and the
+   *   same class as the other configuration mistakes here. If it throws, or returns something that is
+   *   not a string, the probe concludes nothing: a function that looks its path up by id is entitled
+   *   not to know a value it has never been given.
+   * - **At call time**, every path is checked before it is used, and a bad one is a `RangeError`
+   *   naming which option produced it — **for whoever called this transport**. ⚠️ Read the next
+   *   paragraph before relying on that: through the core, nobody is told anything, and the two paths
+   *   fail differently.
+   *
+   * <h3>⚠️ What a call-time path error looks like from ABOVE</h3>
+   *
+   * **Nothing names it.** Neither this package nor the core has a diagnostic channel — the core says
+   * so about itself, and no published code of any of the three packages calls `console`. The
+   * `RangeError` reaches whoever called `fetchPermissions` or `fetchDecisions`
+   * directly; through `createAuthorizationSession` it is caught and turned into state, and nothing is
+   * printed anywhere.
+   *
+   * 📐 And the two options do not fail alike. Measured through a real core session, with a path that
+   * passes the construction probe and fails for the real id, against a backend that permits `read`
+   * on `r-1`:
+   *
+   *     wrong option       session state   decisionFor(read, r-1)   console calls
+   *     -----------------  --------------  -----------------------  -------------
+   *     paths.permissions  UNAVAILABLE     PERMIT                   0
+   *     paths.decisions    READY           DENY                     0
+   *
+   * 🔴 **A wrong `paths.decisions` is the dangerous one.** The menu loads, so the screen is `READY`
+   * and complete; the decision call's chunk rejects, a rejected chunk contributes nothing by the
+   * core's own fail-closed contract, and what is absent reads as a denial. **The result is a working
+   * screen where everything is denied, indistinguishable from a real denial.** A wrong
+   * `paths.permissions` is the milder one: the screen says unavailable, while `decide()` — whose path
+   * is fine — keeps answering what the backend says.
+   *
+   * That per-chunk behaviour is the core's contract for ANY decision failure and is not new here.
+   * What is new is a configuration option that can cause it. **No state will tell you the
+   * decisions path is wrong, so check it in a way that can fail**: call `fetchPermissions` and
+   * `fetchDecisions` on the transport directly, or assert through a session a `PERMIT` you know the
+   * subject has — a session shows a wrong decisions path as a denial — and do it **for every
+   * application id you will use**, not one. A lookup that knows `app-a` and forgot `app-b` passes
+   * construction, answers `app-a` correctly and fails for `app-b` alone.
+   *
+   * <h3>⚠️ A path is not a place to put a secret</h3>
+   *
+   * The route travels into every message this transport throws — `` `${route}: responded 403` `` and
+   * the rest. That is deliberate and documented: the message is built from the route and the status
+   * and from nothing else. Whatever you put in the path is part of the route, so **a token, a key or
+   * anything else you would not want in a log or an error report does not belong there.** This
+   * package cannot prevent it and does not try.
+   */
+  readonly paths?: {
+    readonly permissions?: (encodedApp: string) => string;
+    readonly decisions?: (encodedApp: string) => string;
+  };
 }
 
 /**
@@ -102,6 +190,9 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
   const doFetch = config.fetch ?? globalThis.fetch;
   const root = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
 
+  const permissionsPath = config.paths?.permissions ?? defaultPermissionsPath;
+  const decisionsPath = config.paths?.decisions ?? defaultDecisionsPath;
+
   // Rejected HERE and not at the first call: a misconfiguration that only surfaces once a route is
   // exercised is one a consumer meets in an environment, not in a test.
   if (contextId !== undefined && contextHeader === undefined) {
@@ -109,6 +200,18 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
   }
   if (contextHeader !== undefined && contextId === undefined) {
     throw new RangeError("contextId is required when contextHeader is supplied");
+  }
+  probePath(config.paths?.permissions, "paths.permissions");
+  probePath(config.paths?.decisions, "paths.decisions");
+
+  /**
+   * The path for one call, encoded and checked.
+   *
+   * The encoding happens HERE, not in the consumer's function, so the guarantee below `segment`
+   * describes cannot be handed away by a configuration option.
+   */
+  function routeFor(path: (encodedApp: string) => string, app: string, option: string): string {
+    return requirePath(path(segment(app)), option);
   }
 
   async function headers(): Promise<Record<string, string>> {
@@ -203,7 +306,7 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
 
   return {
     async fetchPermissions(app) {
-      const route = `/me/apps/${segment(app)}/permissions`;
+      const route = routeFor(permissionsPath, app, "paths.permissions");
       const body = await call(route, { method: "GET" });
       const record = object(body, route);
       requireContextEcho(record, route);
@@ -214,7 +317,7 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
     },
 
     async fetchDecisions(app, request: DecisionRequest) {
-      const route = `/me/apps/${segment(app)}/decisions`;
+      const route = routeFor(decisionsPath, app, "paths.decisions");
       const body = await call(route, { method: "POST", body: JSON.stringify(request) });
       const record = object(body, route);
       requireContextEcho(record, route);
@@ -231,9 +334,66 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
  *
  * `encodeURIComponent` and not `encodeURI`: the latter leaves `/` and `?` alone, which is exactly
  * how an identifier escapes its segment and reaches a route nobody meant to call.
+ *
+ * It runs before {@link HttpTransportConfig.paths} sees the id, so configuring a path cannot move
+ * this guarantee to the consumer.
  */
 function segment(value: string): string {
   return encodeURIComponent(value);
+}
+
+/** The paths this package used to hardcode. They are the defaults and nothing else. */
+const defaultPermissionsPath = (encodedApp: string): string => `/me/apps/${encodedApp}/permissions`;
+const defaultDecisionsPath = (encodedApp: string): string => `/me/apps/${encodedApp}/decisions`;
+
+/**
+ * A path is joined to the base URL verbatim, so it must begin with `/`.
+ *
+ * A `RangeError` and not an `AuthorizationTransportError`, because this is the same species of
+ * mistake as a `contextHeader` with no `contextId`: the consumer configured something wrong, and no
+ * server was involved.
+ *
+ * ⚠️ **It names the option to whoever calls this transport directly, and to nobody else.** There is
+ * no diagnostic channel here or in the core, so through a session this error is caught and turned
+ * into state — and 📐 measured, the state is not the same for the two options: a wrong permissions
+ * path gives `UNAVAILABLE`, a wrong decisions path gives `READY` with every decision denied, because
+ * a rejected chunk contributes nothing and absence reads as denial. See
+ * {@link HttpTransportConfig.paths}.
+ */
+function requirePath(path: unknown, option: string): string {
+  if (typeof path !== "string" || !path.startsWith("/")) {
+    throw new RangeError(`${option} must return a path beginning with "/"`);
+  }
+  return path;
+}
+
+/**
+ * The construction-time probe, and it is deliberately timid.
+ *
+ * The package's rule is that a misconfiguration is rejected here and not at the first call, because
+ * one that surfaces only when a route is exercised is met in an environment rather than in a test.
+ * A function cannot be inspected the way a string can, so it is CALLED once, with an id that is
+ * already percent-encoded exactly as a real one would be.
+ *
+ * **It only ever concludes from a returned string.** If the function throws, or returns anything
+ * else, this learns nothing and says nothing: a path that is looked up by application id is entitled
+ * not to know an id it has never been given, and rejecting that would turn a working configuration
+ * into a construction error. What it does catch is the shape that cannot be looked up — a template
+ * missing its leading slash — which is the mistake this is for.
+ */
+function probePath(path: ((encodedApp: string) => string) | undefined, option: string): void {
+  if (path === undefined) {
+    return;
+  }
+  let probed: unknown;
+  try {
+    probed = path(segment("probe"));
+  } catch {
+    return;
+  }
+  if (typeof probed === "string") {
+    requirePath(probed, option);
+  }
 }
 
 /** The package never guesses a shape: a body that is not an object is a broken adapter, loudly. */

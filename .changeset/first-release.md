@@ -36,8 +36,10 @@ containing a separator can forge another pair's key. The cache is bounded by `ma
 *depends* into *no*, and an invisible button tells the user nothing while a refusal message does.
 
 `@ricardoqmd/authz-http` is a reference transport over `fetch`, built by `createHttpTransport`.
-Everything is configuration: the base URL, how a token is obtained, and `fetch` itself, which is
-injectable and defaults to the global. It **reads `app` out of the response body** rather than
+Everything is configuration: the base URL, how a token is obtained, `fetch` itself — injectable and
+defaulting to the global — and the two routes, through an optional `paths`, which defaults to
+`/me/apps/{app}/permissions` and `/me/apps/{app}/decisions`. The application id reaches a configured
+path already percent-encoded, so configuring a route cannot hand that guarantee to the caller. It **reads `app` out of the response body** rather than
 filling it in from what it asked — filling it in would make the core's own check tautological — and
 rejects a body that is missing a field by naming the field and the route. `403` classifies as
 `NO_ACCESS_IN_APP` and everything else as `UNAVAILABLE`, overridable through `classifyError`, which
