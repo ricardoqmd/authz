@@ -330,10 +330,15 @@ describe("the Accept header", () => {
 });
 
 describe("path segments are encoded", () => {
+  /*
+   * `a/b` used to be the example here. It is REFUSED now — a separator in an application id survives
+   * percent-encoding only until a proxy decodes it back — so the encoding property is shown with `?`,
+   * which is a character the encoder handles and nothing downstream turns back into a separator.
+   */
   it("an app id cannot escape its segment", async () => {
-    const s = stub(() => json({ app: "a/b", permissions: [] }));
-    await transport({ fetch: s.fetchDouble }).fetchPermissions("a/b");
-    expect(s.calls[0]!.url).toBe(`${BASE}/me/apps/a%2Fb/permissions`);
+    const s = stub(() => json({ app: "a?b", permissions: [] }));
+    await transport({ fetch: s.fetchDouble }).fetchPermissions("a?b");
+    expect(s.calls[0]!.url).toBe(`${BASE}/me/apps/a%3Fb/permissions`);
   });
 });
 
@@ -558,7 +563,7 @@ describe("the routes are configuration, with today's values as defaults", () => 
    * remember `encodeURIComponent`, and the failure of forgetting is a route nobody meant to call.
    */
   it("the application id reaches a configured path ALREADY percent-encoded", async () => {
-    const s = stub(() => json({ ...MENU, app: "a/b?c" }));
+    const s = stub(() => json({ ...MENU, app: "a?b#c" }));
     const seen: string[] = [];
     await transport({
       fetch: s.fetchDouble,
@@ -568,20 +573,20 @@ describe("the routes are configuration, with today's values as defaults", () => 
           return `/authz/${encodedApp}/menu`;
         },
       },
-    }).fetchPermissions("a/b?c");
+    }).fetchPermissions("a?b#c");
 
     // Two entries, and the first is the construction probe: the function is called once with the
     // probe id before any request. A consumer whose path function has side effects needs to know
     // that, so this asserts the whole sequence instead of the last call.
-    expect(seen).toEqual(["probe", "a%2Fb%3Fc"]);
-    expect(s.calls[0]!.url).toBe("https://example.test/api/authz/a%2Fb%3Fc/menu");
-    expect(s.calls[0]!.url).not.toContain("a/b?c");
+    expect(seen).toEqual(["probe", "a%3Fb%23c"]);
+    expect(s.calls[0]!.url).toBe("https://example.test/api/authz/a%3Fb%23c/menu");
+    expect(s.calls[0]!.url).not.toContain("a?b#c");
   });
 
   it("the same id in the DEFAULT path is encoded too", async () => {
-    const s = stub(() => json({ ...MENU, app: "a/b?c" }));
-    await transport({ fetch: s.fetchDouble }).fetchPermissions("a/b?c");
-    expect(s.calls[0]!.url).toBe("https://example.test/api/me/apps/a%2Fb%3Fc/permissions");
+    const s = stub(() => json({ ...MENU, app: "a?b#c" }));
+    await transport({ fetch: s.fetchDouble }).fetchPermissions("a?b#c");
+    expect(s.calls[0]!.url).toBe("https://example.test/api/me/apps/a%3Fb%23c/permissions");
   });
 
   /*
@@ -655,5 +660,126 @@ describe("the routes are configuration, with today's values as defaults", () => 
 
     await t.fetchPermissions(APP);
     expect(s.calls[0]!.url).toBe("https://example.test/api/authz/app-a/menu");
+  });
+});
+
+/* 8 — the ids that cannot be a path segment ------------------------------- */
+
+/*
+ * `encodeURIComponent` leaves a dot alone, and the URL parser resolves dot segments before the
+ * request goes out — so `..` used to leave for one route up, WITH the Authorization header, and `.`
+ * used to collapse its own segment. Encoding them does not help: the parser decodes first. The only
+ * faithful answer is to refuse them, and the empty string with them, since it occupies no segment at
+ * all.
+ */
+describe("an application id that cannot be a path segment is refused", () => {
+  /*
+   * EVERY REFUSED VALUE, THROUGH EVERY DOOR. Four values x two calls x three route shapes (default,
+   * a configured permissions path, a configured decisions path). Anything less left real bypasses
+   * green: a refusal that covered only ".." on the default path passed the whole suite, and so did a
+   * configured decisions path that encoded the id itself instead of going through `segment`.
+   *
+   * `s.calls` empty is the assertion that names the harm — the old behaviour was a request that LEFT,
+   * with the Authorization header on it.
+   */
+  const REFUSED = ["..", ".", "", "/"] as const;
+  const DOORS = [
+    ["default path", {}],
+    ["configured permissions path", { paths: { permissions: (a: string) => `/authz/${a}/menu` } }],
+    ["configured decisions path", { paths: { decisions: (a: string) => `/authz/${a}/may` } }],
+  ] as const;
+
+  for (const [door, over] of DOORS) {
+    for (const id of REFUSED) {
+      it(`${JSON.stringify(id)} is refused on fetchPermissions via the ${door}, and NOTHING is sent`, async () => {
+        const s = stub(byRoute());
+        const outcome = await transport({ fetch: s.fetchDouble, ...over })
+          .fetchPermissions(id)
+          .then(() => "sent", (e: unknown) => (e as Error).name);
+
+        expect([id, outcome]).toEqual([id, "RangeError"]);
+        expect(s.calls).toEqual([]);
+      });
+
+      it(`${JSON.stringify(id)} is refused on fetchDecisions via the ${door}, and NOTHING is sent`, async () => {
+        const s = stub(byRoute());
+        const outcome = await transport({ fetch: s.fetchDouble, ...over })
+          .fetchDecisions(id, REQUEST)
+          .then(() => "sent", (e: unknown) => (e as Error).name);
+
+        expect([id, outcome]).toEqual([id, "RangeError"]);
+        expect(s.calls).toEqual([]);
+      });
+    }
+  }
+
+  /*
+   * THE OTHER HALF, and it is the one that keeps the refusal honest: only three values are refused.
+   * An id that merely LOOKS dangerous is encoded and sent, because it does not escape — measured
+   * against a real server for every one of these.
+   */
+  it("ids that look dangerous but stay in their segment are still sent, encoded", async () => {
+    for (const [id, encoded] of [
+      ["...", "..."],
+      ["a..b", "a..b"],
+      ["%2e%2e", "%252e%252e"],
+      ["a?b", "a%3Fb"],
+      ["a b", "a%20b"],
+    ] as const) {
+      const s = stub(() => json({ ...MENU, app: id }));
+      // The outcome is READ and not awaited bare: a refusal must fail the assertion that names the
+      // behaviour, not prevent it from running. An over-broad refusal used to reject here and the
+      // URL was never compared at all.
+      const outcome = await transport({ fetch: s.fetchDouble })
+        .fetchPermissions(id)
+        .then(() => "sent", (e: unknown) => `${(e as Error).name}: ${(e as Error).message}`);
+
+      expect([id, outcome]).toEqual([id, "sent"]);
+      expect(s.calls[0]?.url).toBe(`https://example.test/api/me/apps/${encoded}/permissions`);
+    }
+  });
+});
+
+/* 9 — the request that has a body says what the body is ------------------- */
+
+describe("the decisions request declares its content type", () => {
+  /*
+   * THE COMPLETE SET, with strict equality, on BOTH calls. `toBeUndefined` on one key was not enough:
+   * a lower-case `content-type` on the GET, or the key present with the value `undefined`, both
+   * passed the whole suite — and on the wire the GET carried a content type in each case. What the
+   * request actually sends is the whole record, so the whole record is what is asserted.
+   */
+  it("the POST sends exactly these headers", async () => {
+    const s = stub(() => json(SET));
+    await transport({ fetch: s.fetchDouble }).fetchDecisions(APP, REQUEST);
+
+    expect(headersOf(s.calls[0]!.init)).toEqual({
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Authorization: "Bearer tok-123",
+    });
+  });
+
+  it("the GET, which has no body, sends exactly these — and no content type under any spelling", async () => {
+    const s = stub(() => json(MENU));
+    await transport({ fetch: s.fetchDouble }).fetchPermissions(APP);
+
+    const sent = headersOf(s.calls[0]!.init);
+    expect(sent).toEqual({ Accept: "application/json", Authorization: "Bearer tok-123" });
+    // Strict equality already forbids it; this says the reason out loud, because the two mutations
+    // that slipped through were a lower-case key and a key whose value was `undefined`.
+    expect(Object.keys(sent).map((k) => k.toLowerCase())).not.toContain("content-type");
+  });
+
+  it("the other headers are unchanged by it", async () => {
+    const s = stub(byRoute({ contextId: CTX }));
+    await withContext({ fetch: s.fetchDouble }).fetchDecisions(APP, REQUEST);
+
+    expect(headersOf(s.calls[0]!.init)).toEqual({
+      Accept: "application/json",
+      Authorization: "Bearer tok-123",
+      "X-Context-Id": CTX,
+      "Content-Type": "application/json",
+    });
   });
 });
