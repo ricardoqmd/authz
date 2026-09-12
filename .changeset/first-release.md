@@ -39,9 +39,24 @@ containing a separator can forge another pair's key. The cache is bounded by `ma
 Everything is configuration: the base URL, how a token is obtained, `fetch` itself — injectable and
 defaulting to the global — and the two routes, through an optional `paths`, which defaults to
 `/me/apps/{app}/permissions` and `/me/apps/{app}/decisions`. The application id reaches a configured
-path already percent-encoded, so configuring a route cannot hand that guarantee to the caller. It **reads `app` out of the response body** rather than
-filling it in from what it asked — filling it in would make the core's own check tautological — and
-rejects a body that is missing a field by naming the field and the route. `403` classifies as
+path already percent-encoded, so configuring a route cannot hand that guarantee to the caller, and the
+four ids encoding cannot make safe — `".."`, `"."`, `""` and any id containing `/` — are refused with a
+`RangeError` before anything is sent: a dot segment is resolved away by the URL parser, and a `%2F` is
+decoded back into a separator by a reverse proxy in its common configuration, so the request would
+otherwise leave with the `Authorization` header toward a route the caller did not write. What the
+package guarantees is the segment in the URL it constructs; a proxy that decodes `%2F` before
+resolving dot segments is outside its reach, and the README says so.
+
+The decisions request declares `Content-Type: application/json`; the permissions request, which has no
+body, declares none. 🔴 Across origins in a browser this affects all four configurations: measured in
+Chrome 152 and Firefox 151, the preflight now asks for `content-type`, and a backend whose
+`Access-Control-Allow-Headers` does not name it fails the preflight — the `POST` never leaves, nothing
+says so, and the screen is `READY` with every decision reading `DENY`. **Allow `Content-Type` before
+updating.** The README has the detail.
+
+It **reads `app` out of the response body** rather than filling it in from what it asked — filling it
+in would make the core's own check tautological — and rejects a body that is missing a field by naming
+the field and the route. `403` classifies as
 `NO_ACCESS_IN_APP` and everything else as `UNAVAILABLE`, overridable through `classifyError`, which
 sees the parsed body; a `classifyError` that throws is treated as one that returned nothing.
 

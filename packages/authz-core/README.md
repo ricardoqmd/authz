@@ -102,6 +102,9 @@ into chunks of at most `maxPairsPerRequest` and every chunk is asked **concurren
 - **The order of the returned array is unspecified.** It is a lookup table: read it with
   `decisionFor`, never by position.
 - A session that has not started, or one that has been closed, answers the empty list.
+- **Cached decisions live until `start()` runs again.** There is no time-to-live and no clock:
+  `start()` clears the cache and the next `decide()` asks the decision point afresh. Until then a
+  decision already obtained is served from memory.
 
 ### `close()`
 

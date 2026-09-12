@@ -77,9 +77,19 @@ export interface HttpTransportConfig {
    * <h3>`encodedApp` arrives PERCENT-ENCODED, and that is the whole point of the parameter's name</h3>
    *
    * **Interpolate it and nothing else.** The package encodes the application id with
-   * `encodeURIComponent` before your function sees it, so an id containing `/` or `?` cannot escape
-   * its segment and reach a route nobody meant to call. Had the raw id been passed instead, that
-   * guarantee would have moved to you silently, and forgetting to encode is the ordinary mistake.
+   * `encodeURIComponent` before your function sees it, and **four ids that encoding cannot make safe
+   * are REFUSED outright**, with a `RangeError` and no request sent: `".."`, `"."`, `""` and any id
+   * containing `/`. The refusal runs before your function is called, so a configured path cannot walk
+   * around it. Had the raw id been passed instead, that guarantee would have moved to you silently,
+   * and forgetting to encode is the ordinary mistake.
+   *
+   * ⚠️ **What is guaranteed, and where it stops: the segment in the URL THIS PACKAGE CONSTRUCTS.**
+   * An id occupies exactly one segment of that URL. What a reverse proxy does with it afterwards is
+   * outside this package's reach: 📐 measured against `nginx 1.29.3` with
+   * `proxy_pass http://upstream/api/;`, `%2F` is decoded and the dot segments re-resolved, so before
+   * the `/` refusal existed `"../secret"` left here as `/api/me/apps/..%2Fsecret/permissions` and the
+   * upstream received `/api/me/secret/permissions`, with the `Authorization` header. `%5C` was NOT
+   * decoded by that proxy, which is why `\` is not refused and `/` is.
    *
    * **Do not encode it again.** ⚠️ **For an ordinary id it changes nothing**:
    * `encodeURIComponent("app-a")` is `"app-a"` and encoding it twice is still `"app-a"`, so a
@@ -214,8 +224,34 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
     return requirePath(path(segment(app)), option);
   }
 
-  async function headers(): Promise<Record<string, string>> {
+  async function headers(hasBody: boolean): Promise<Record<string, string>> {
     const out: Record<string, string> = { Accept: "application/json" };
+    // THE REQUEST THAT HAS A BODY SAYS WHAT THE BODY IS, and only that one. `body` is a string, so
+    // without this the platform labels it `text/plain;charset=UTF-8`.
+    //
+    // 📐 Measured against a real server before this line existed: the POST arrived as
+    // `content-type: text/plain;charset=UTF-8`, a backend that requires JSON answered `415`, the
+    // chunk was dropped, and the session sat at `READY` with zero decisions and `DENY` for a pair
+    // the backend would have permitted — the working screen with everything denied that this file
+    // warns about elsewhere.
+    //
+    // Keyed on the body and not on the method so that a future route with a body cannot forget it.
+    //
+    // 🔴 IN A BROWSER, ACROSS ORIGINS, THIS AFFECTS ALL FOUR CONFIGURATIONS. 📐 Measured in Chrome
+    // 152 and Firefox 151, page and backend on different origins, through a session: in the first
+    // three the preflight now asks for `content-type` beside `Authorization` or the context header,
+    // and a backend whose `Access-Control-Allow-Headers` names only those two fails it; in the
+    // fourth — no token and no context pair — the content type is the only reason the decisions
+    // request is preflighted at all, and a backend that does not answer `OPTIONS` fails it.
+    //
+    // Either way the browser never sends the POST and nothing says so: the menu request carries no
+    // content type and still loads, so the screen is `READY` and every decision reads `DENY`, for
+    // pairs the backend permits too. With `Content-Type` among the allowed headers all four answered
+    // what the backend said; same-origin, neither browser sent an `OPTIONS` in any configuration.
+    // The README says it where a consumer will look for it.
+    if (hasBody) {
+      out["Content-Type"] = "application/json";
+    }
     const token = await getToken();
     // Omitted ENTIRELY when there is no token. `Authorization: Bearer ` is a different statement
     // to a backend than sending nothing, and it is not the one we mean.
@@ -244,7 +280,7 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
     const url = `${root}${route}`;
     let response: Response;
     try {
-      response = await doFetch(url, { ...init, headers: await headers() });
+      response = await doFetch(url, { ...init, headers: await headers(init.body !== undefined) });
     } catch {
       throw new AuthorizationTransportError("UNAVAILABLE", `${route}: the request did not complete`);
     }
@@ -330,15 +366,59 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
 }
 
 /**
- * A path segment, percent-encoded.
+ * A path segment: refused if it cannot be one, percent-encoded if it can.
+ *
+ * <h3>Encoding, which handles almost everything</h3>
  *
  * `encodeURIComponent` and not `encodeURI`: the latter leaves `/` and `?` alone, which is exactly
  * how an identifier escapes its segment and reaches a route nobody meant to call.
  *
- * It runs before {@link HttpTransportConfig.paths} sees the id, so configuring a path cannot move
- * this guarantee to the consumer.
+ * <h3>⚠️ And the three values encoding cannot handle, which are REFUSED</h3>
+ *
+ * 📐 `encodeURIComponent` leaves a dot alone, and the platform's URL parser resolves dot segments
+ * **before the request goes out**. Measured against a real HTTP server, with the default path:
+ *
+ *     id     sent as                          the server received             escapes
+ *     -----  -------------------------------  ------------------------------  -------
+ *     ".."   /api/me/apps/../permissions      /api/me/permissions             yes
+ *     "."    /api/me/apps/./permissions       /api/me/apps/permissions        yes
+ *     ""     /api/me/apps//permissions        /api/me/apps//permissions       no
+ *     "..."  /api/me/apps/.../permissions     /api/me/apps/.../permissions    no
+ *     "a..b" /api/me/apps/a..b/permissions    /api/me/apps/a..b/permissions   no
+ *     "a/b"  /api/me/apps/a%2Fb/permissions   /api/me/apps/a%2Fb/permissions  no
+ *
+ * 🔴 The request leaves **with the `Authorization` header** toward a route the caller did not write.
+ * The core discards the answer, because the `app` will not match — but the request already happened.
+ *
+ * 📐 **And encoding the dots is not a fix.** The parser percent-decodes before it resolves, so
+ * `%2e%2e` and `%2E%2E` reach the same `/api/me/permissions` that `..` does. Measured. The only
+ * faithful answer is to refuse the value.
+ *
+ * The empty string is refused for a different reason, and not a security one: it occupies NO
+ * segment, so `/me/apps//permissions` is a differently shaped route rather than a route for an
+ * application. The guarantee this function exists to make is "the id is exactly one segment", and
+ * that cannot be said of a value that is none.
+ *
+ * <h3>Why here</h3>
+ *
+ * This is the one place an id becomes a path segment, and it runs BEFORE
+ * {@link HttpTransportConfig.paths} sees the value — so a configured path cannot walk around it, and
+ * neither can a future second route. The core builds no URL and has no reason to know that a dot is
+ * special in one.
  */
 function segment(value: string): string {
+  // A `RangeError` and not an `AuthorizationTransportError`: no request was made and nothing is
+  // unavailable. 📐 Through a core session the two are indistinguishable — both give `UNAVAILABLE`,
+  // both deny, neither prints anything — so the choice rests entirely on the direct caller and on
+  // code that catches by type. `AuthorizationTransportError` would tell a consumer's retry logic
+  // that a backend is down, about a request that was never sent and can never succeed.
+  if (value === "" || value === "." || value === ".." || value.includes("/")) {
+    throw new RangeError(
+      `the application id ${JSON.stringify(value)} cannot be a path segment: ` +
+        `"." and ".." are resolved away by the URL parser, "" occupies no segment, ` +
+        `and a "/" is a separator that a proxy can decode back into one`,
+    );
+  }
   return encodeURIComponent(value);
 }
 
