@@ -483,3 +483,177 @@ describe("the port", () => {
     expect((transport() as unknown as Record<string, unknown>).listContexts).toBeUndefined();
   });
 });
+
+/* 7 — the routes, which are configuration now ----------------------------- */
+
+/*
+ * The two paths used to be the only thing in this package that asserted something about one
+ * deployment's backend. They are options now, with the old strings as their defaults, so the first
+ * test here is the one that matters most: a caller who passes nothing must still produce the exact
+ * URL it produced before. It asserts the URL the injected `fetch` received, not that the call
+ * resolved — a wrong route that happens to be answered by the double would resolve just fine.
+ */
+describe("the routes are configuration, with today's values as defaults", () => {
+  it("a caller that passes nothing gets the URLs it got before, character for character", async () => {
+    const s = stub(byRoute());
+    const t = transport({ fetch: s.fetchDouble });
+    await t.fetchPermissions(APP);
+    await t.fetchDecisions(APP, REQUEST);
+
+    expect(s.calls.map((c) => c.url)).toEqual([
+      "https://example.test/api/me/apps/app-a/permissions",
+      "https://example.test/api/me/apps/app-a/decisions",
+    ]);
+  });
+
+  it("a supplied path is used, and the other keeps its default", async () => {
+    const s = stub(byRoute());
+    const t = transport({
+      fetch: s.fetchDouble,
+      paths: { permissions: (encodedApp) => `/authz/${encodedApp}/menu` },
+    });
+    await t.fetchPermissions(APP);
+    await t.fetchDecisions(APP, REQUEST);
+
+    expect(s.calls.map((c) => c.url)).toEqual([
+      "https://example.test/api/authz/app-a/menu",
+      "https://example.test/api/me/apps/app-a/decisions",
+    ]);
+  });
+
+  /*
+   * BOTH SIDES ARE CALLED, and that is not decoration. Until this test called `fetchDecisions` too,
+   * a configured `decisions` path could be ignored outright — the whole entry discarded in favour of
+   * the default — and all 51 tests stayed green. The name promised two and the body exercised one,
+   * which is how half a feature ships with no witness.
+   *
+   * ⚠️ The stub answers ONE body that satisfies both shapes — `app`, `permissions` AND `decisions` —
+   * on purpose. Answering by route makes this test red for the wrong reason: the transport rejects
+   * the body before the URLs are ever compared, and a witness that fails on a body shape is not a
+   * witness for a route. With this body nothing can fail except the assertion that names the
+   * behaviour.
+   */
+  it("both paths can be supplied, and BOTH are used", async () => {
+    const s = stub(() => json({ app: APP, permissions: [], decisions: [] }));
+    const t = transport({
+      fetch: s.fetchDouble,
+      paths: {
+        permissions: (encodedApp) => `/v2/${encodedApp}/can`,
+        decisions: (encodedApp) => `/v2/${encodedApp}/may`,
+      },
+    });
+    await t.fetchPermissions(APP);
+    await t.fetchDecisions(APP, REQUEST);
+
+    expect(s.calls.map((c) => c.url)).toEqual([
+      "https://example.test/api/v2/app-a/can",
+      "https://example.test/api/v2/app-a/may",
+    ]);
+  });
+
+  /*
+   * THE GUARANTEE THAT DID NOT MOVE. The id is percent-encoded by this package BEFORE the configured
+   * function sees it, so a consumer who interpolates it — which is all the doc asks — cannot let an
+   * id escape its segment. Had the raw id been passed instead, this test would need the consumer to
+   * remember `encodeURIComponent`, and the failure of forgetting is a route nobody meant to call.
+   */
+  it("the application id reaches a configured path ALREADY percent-encoded", async () => {
+    const s = stub(() => json({ ...MENU, app: "a/b?c" }));
+    const seen: string[] = [];
+    await transport({
+      fetch: s.fetchDouble,
+      paths: {
+        permissions: (encodedApp) => {
+          seen.push(encodedApp);
+          return `/authz/${encodedApp}/menu`;
+        },
+      },
+    }).fetchPermissions("a/b?c");
+
+    // Two entries, and the first is the construction probe: the function is called once with the
+    // probe id before any request. A consumer whose path function has side effects needs to know
+    // that, so this asserts the whole sequence instead of the last call.
+    expect(seen).toEqual(["probe", "a%2Fb%3Fc"]);
+    expect(s.calls[0]!.url).toBe("https://example.test/api/authz/a%2Fb%3Fc/menu");
+    expect(s.calls[0]!.url).not.toContain("a/b?c");
+  });
+
+  it("the same id in the DEFAULT path is encoded too", async () => {
+    const s = stub(() => json({ ...MENU, app: "a/b?c" }));
+    await transport({ fetch: s.fetchDouble }).fetchPermissions("a/b?c");
+    expect(s.calls[0]!.url).toBe("https://example.test/api/me/apps/a%2Fb%3Fc/permissions");
+  });
+
+  /*
+   * A path without its leading slash builds a wrong URL, and silence is the one outcome this package
+   * refuses. Both places it can be caught are asserted, and the second is the reason the first is
+   * allowed to be timid.
+   */
+  it("a path missing its leading slash is rejected AT CONSTRUCTION, naming the option", () => {
+    expect(() =>
+      transport({ paths: { permissions: (encodedApp) => `me/apps/${encodedApp}/permissions` } }),
+    ).toThrow(new RangeError('paths.permissions must return a path beginning with "/"'));
+  });
+
+  it("the decisions path is probed too, and names its own option", () => {
+    expect(() =>
+      transport({ paths: { decisions: (encodedApp) => `me/apps/${encodedApp}/decisions` } }),
+    ).toThrow(new RangeError('paths.decisions must return a path beginning with "/"'));
+  });
+
+  it("a path that goes bad only for a real id is rejected AT CALL TIME, not silently", async () => {
+    const s = stub(byRoute());
+    // The probe id passes; the real one does not. No construction check can see this, which is why
+    // the call-time check exists and why the probe is not the whole guard.
+    const t = transport({
+      fetch: s.fetchDouble,
+      paths: { permissions: (encodedApp) => (encodedApp === "app-a" ? "no-slash" : "/probe/ok") },
+    });
+
+    await expect(t.fetchPermissions(APP)).rejects.toThrow(
+      new RangeError('paths.permissions must return a path beginning with "/"'),
+    );
+    expect(s.calls).toEqual([]);
+  });
+
+  it("an empty path is rejected as well: it would silently call the base URL itself", () => {
+    expect(() => transport({ paths: { permissions: () => "" } })).toThrow(RangeError);
+  });
+
+  /*
+   * THE PROBE IS DELIBERATELY TIMID, and this is the test that keeps it that way. A path looked up
+   * by application id is entitled not to know an id it has never been given; rejecting that would
+   * turn a working configuration into a construction error.
+   */
+  it("a path function that throws for the probe id is NOT rejected at construction", async () => {
+    const s = stub(byRoute());
+    const known: Record<string, string> = { "app-a": "/authz/app-a/menu" };
+    const t = transport({
+      fetch: s.fetchDouble,
+      paths: {
+        permissions: (encodedApp) => {
+          const found = known[encodedApp];
+          if (found === undefined) throw new Error("unknown application");
+          return found;
+        },
+      },
+    });
+
+    await t.fetchPermissions(APP);
+    expect(s.calls[0]!.url).toBe("https://example.test/api/authz/app-a/menu");
+  });
+
+  it("a path function that returns a non-string for the probe id is not rejected either", async () => {
+    const s = stub(byRoute());
+    const t = transport({
+      fetch: s.fetchDouble,
+      paths: {
+        permissions: (encodedApp) =>
+          (({ "app-a": "/authz/app-a/menu" }) as Record<string, string>)[encodedApp] as string,
+      },
+    });
+
+    await t.fetchPermissions(APP);
+    expect(s.calls[0]!.url).toBe("https://example.test/api/authz/app-a/menu");
+  });
+});
