@@ -444,7 +444,7 @@ describe("createAuthorizationSession — decide", () => {
    * `("read<sep>r-1", "x")` encodes to the SAME string, so a membership check over that encoding
    * admits a pair nobody asked for. Length-prefixing distinguishes them by construction.
    *
-   * ⚠️ THE FORGERY'S EFFECT DIFFERS ON PURPOSE. With a separator-joined encoding the two keys are
+   * THE FORGERY'S EFFECT DIFFERS ON PURPOSE. With a separator-joined encoding the two keys are
    * equal, so the collapse merges them under deny-overrides and the requested pair comes back
    * DENY. Giving both PERMIT hides the collision entirely — one collapsed PERMIT looks exactly
    * like no collision at all — and measured, written that way every separator mutation stayed

@@ -117,7 +117,7 @@ export interface AuthorizationSession {
    * `decisionFor`; `start()` resolves without calling the transport and without touching state;
    * `subscribe()` registers nothing; and `getState()` is `IDLE`.
    *
-   * ⚠️ **It cannot cancel a call already in flight** — this package never owned that `fetch`. What
+   * **It cannot cancel a call already in flight** — this package never owned that `fetch`. What
    * it guarantees is that the answer is thrown away: the generation bump condemns it and nothing it
    * returns is cached or rendered.
    *
@@ -298,11 +298,11 @@ export function createAuthorizationSession(
       }
       // Idempotence is stated by that guard rather than emerging from the steps below.
       //
-      // ⚠️ THE DELIBERATELY-REDUNDANT FAMILY OF THIS FILE, and it is a map rather than a list of
+      // THE DELIBERATELY-REDUNDANT FAMILY OF THIS FILE, and it is a map rather than a list of
       // labels: EVERY CANDIDATE WAS NEUTRALISED AND THE SUITE RE-RUN, so membership is measured
       // and not asserted. A line that is here is defence in depth — removing it turns nothing red.
       //
-      // ⚠️ WHAT THIS LIST DOES **NOT** SAY, and it used to: it is not a claim that everything
+      // WHAT THIS LIST DOES **NOT** SAY, and it used to: it is not a claim that everything
       // absent from it is load-bearing and has a test. That sentence was here, it was false, and
       // the instrument that built this very list disproved it — three neutralisations in this file
       // were green and none of them was listed. Two of them were plain gaps and now have tests
@@ -321,7 +321,7 @@ export function createAuthorizationSession(
       //      the request splits into zero chunks and returns the empty array too, with no
       //      transport call on either path
       //
-      // ⚠️ AND THIS GUARD IS NOT ONE OF THEM ANY MORE. It was redundant while nothing re-entered
+      // AND THIS GUARD IS NOT ONE OF THEM ANY MORE. It was redundant while nothing re-entered
       // `close()`; neutralise it now and "a listener that re-enters close() from the final IDLE
       // does not recurse" goes red with **2298 emissions** before the stack runs out. Idempotence
       // is behaviour here, not a promise held by accident.

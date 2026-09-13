@@ -244,7 +244,7 @@ describe("switching contexts", () => {
   });
 });
 
-/* 4 — 🔴 THE SEAM --------------------------------------------------------- */
+/* 4 — THE SEAM --------------------------------------------------------- */
 
 describe("the seam: a context change supersedes what the core cannot see", () => {
   it("a decide() in flight under ctx-a that resolves after a switch returns []", async () => {

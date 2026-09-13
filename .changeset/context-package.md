@@ -25,7 +25,7 @@ consumer asks *which context am I in* and then *what does the permissions sessio
 would make this package re-declare every state the core has, and every state the core ever added
 would break this package's types.
 
-⚠️ **It keeps its own generation counter, and that is the reason this package is not a thin wrapper.**
+**It keeps its own generation counter, and that is the reason this package is not a thin wrapper.**
 The core's counter is a per-session closure variable, so a layer holding one session per context has N
 independent counters and **none of them can see a context change** — that is an event of another
 object. A `decide()` issued under one context resolves *correctly, for that context*; returning it

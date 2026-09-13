@@ -295,16 +295,20 @@ describe("the Authorization header", () => {
     expect(headersOf(s.calls[0]!.init).Authorization).toBe("Bearer tok-123");
   });
 
+  // ENTIRELY means the key, not only its value. `toBeUndefined` passed with the key present and
+  // valued `undefined`, and `fetch` sends that as the string "undefined": measured, a server
+  // received `authorization: undefined`. The whole record is asserted, strictly, as the
+  // content-type tests do.
   it("is absent ENTIRELY when getToken yields null", async () => {
     const s = stub(() => json(MENU));
     await transport({ fetch: s.fetchDouble, getToken: () => null }).fetchPermissions(APP);
-    expect(headersOf(s.calls[0]!.init).Authorization).toBeUndefined();
+    expect(headersOf(s.calls[0]!.init)).toStrictEqual({ Accept: "application/json" });
   });
 
   it("is absent when getToken yields an EMPTY STRING, not just null", async () => {
     const s = stub(() => json(MENU));
     await transport({ fetch: s.fetchDouble, getToken: () => "" }).fetchPermissions(APP);
-    expect(headersOf(s.calls[0]!.init).Authorization).toBeUndefined();
+    expect(headersOf(s.calls[0]!.init)).toStrictEqual({ Accept: "application/json" });
   });
 
   it("awaits an async getToken", async () => {
@@ -329,16 +333,37 @@ describe("the Accept header", () => {
   });
 });
 
-describe("path segments are encoded", () => {
+describe("an app id occupies exactly one segment", () => {
   /*
-   * `a/b` used to be the example here. It is REFUSED now — a separator in an application id survives
-   * percent-encoding only until a proxy decodes it back — so the encoding property is shown with `?`,
-   * which is a character the encoder handles and nothing downstream turns back into a separator.
+   * This used to be an ENCODING property, shown with an id containing `?` or `/`. Neither can be
+   * shown that way any more, because the rule refuses both: the guarantee is no longer "whatever you
+   * pass is encoded into one segment" but "only ids that already are one segment are accepted".
+   *
+   * So the property is asserted from both sides — an accepted id lands in its segment and nowhere
+   * else, and an id that would have needed encoding to stay there never leaves.
    */
-  it("an app id cannot escape its segment", async () => {
+  it("an accepted id lands in its own segment, and nothing else moves", async () => {
+    const s = stub(() => json({ app: "a.b~c-d_e", permissions: [] }));
+    // The outcome is READ and not awaited bare. An OVER-BROAD rule refuses this id, and a bare
+    // `await` turns that into the rule's own `RangeError` escaping the test — a failure that never
+    // reaches the assertion naming the behaviour, and therefore not evidence about the segment.
+    // Measured: with the rule narrowed to "no dots", this test failed with `RangeError: no dots`
+    // and the URL was never compared.
+    const outcome = await transport({ fetch: s.fetchDouble })
+      .fetchPermissions("a.b~c-d_e")
+      .then(() => "sent", (e: unknown) => `${(e as Error).name}: ${(e as Error).message}`);
+
+    expect([outcome, s.calls[0]?.url]).toEqual(["sent", `${BASE}/me/apps/a.b~c-d_e/permissions`]);
+  });
+
+  it("an id that would need encoding to stay in its segment is refused instead", async () => {
     const s = stub(() => json({ app: "a?b", permissions: [] }));
-    await transport({ fetch: s.fetchDouble }).fetchPermissions("a?b");
-    expect(s.calls[0]!.url).toBe(`${BASE}/me/apps/a%3Fb/permissions`);
+    const outcome = await transport({ fetch: s.fetchDouble })
+      .fetchPermissions("a?b")
+      .then(() => "sent", (e: unknown) => (e as Error).name);
+
+    expect(outcome).toBe("RangeError");
+    expect(s.calls).toEqual([]);
   });
 });
 
@@ -532,7 +557,7 @@ describe("the routes are configuration, with today's values as defaults", () => 
    * the default — and all 51 tests stayed green. The name promised two and the body exercised one,
    * which is how half a feature ships with no witness.
    *
-   * ⚠️ The stub answers ONE body that satisfies both shapes — `app`, `permissions` AND `decisions` —
+   * The stub answers ONE body that satisfies both shapes — `app`, `permissions` AND `decisions` —
    * on purpose. Answering by route makes this test red for the wrong reason: the transport rejects
    * the body before the URLs are ever compared, and a witness that fails on a body shape is not a
    * witness for a route. With this body nothing can fail except the assertion that names the
@@ -557,36 +582,69 @@ describe("the routes are configuration, with today's values as defaults", () => 
   });
 
   /*
-   * THE GUARANTEE THAT DID NOT MOVE. The id is percent-encoded by this package BEFORE the configured
-   * function sees it, so a consumer who interpolates it — which is all the doc asks — cannot let an
-   * id escape its segment. Had the raw id been passed instead, this test would need the consumer to
-   * remember `encodeURIComponent`, and the failure of forgetting is a route nobody meant to call.
+   * THE GUARANTEE THAT DID NOT MOVE. Both halves of the rule run BEFORE the configured function sees
+   * the value: an id outside the unreserved set never reaches it at all, and one inside it arrives
+   * already encoded. So a consumer who interpolates the argument — which is all the doc asks — cannot
+   * let an id escape its segment, and cannot walk around the refusal by configuring a path. Had the
+   * raw id been passed instead, this test would need the consumer to remember both, and the failure
+   * of forgetting either is a route nobody meant to call.
    */
-  it("the application id reaches a configured path ALREADY percent-encoded", async () => {
-    const s = stub(() => json({ ...MENU, app: "a?b#c" }));
+  it("a configured path never sees an id the rule refuses", async () => {
     const seen: string[] = [];
-    await transport({
-      fetch: s.fetchDouble,
-      paths: {
-        permissions: (encodedApp) => {
-          seen.push(encodedApp);
-          return `/authz/${encodedApp}/menu`;
+    const build = (id: string) => {
+      const s = stub(() => json({ ...MENU, app: id }));
+      return transport({
+        fetch: s.fetchDouble,
+        paths: {
+          permissions: (encodedApp) => {
+            seen.push(encodedApp);
+            return `/authz/${encodedApp}/menu`;
+          },
         },
-      },
-    }).fetchPermissions("a?b#c");
+      });
+    };
 
-    // Two entries, and the first is the construction probe: the function is called once with the
-    // probe id before any request. A consumer whose path function has side effects needs to know
-    // that, so this asserts the whole sequence instead of the last call.
-    expect(seen).toEqual(["probe", "a%3Fb%23c"]);
-    expect(s.calls[0]!.url).toBe("https://example.test/api/authz/a%3Fb%23c/menu");
-    expect(s.calls[0]!.url).not.toContain("a?b#c");
+    // The refused id never reaches the function. This is the guarantee that did not move when the
+    // rule changed shape: the check runs BEFORE a configured path sees the value, so a consumer who
+    // interpolates the argument — which is all the doc asks — cannot be handed something that
+    // escapes the segment.
+    await build("a?b#c")
+      .fetchPermissions("a?b#c")
+      .then(() => undefined, () => undefined);
+
+    // One entry, and it is the construction probe: the function is called once with the probe id
+    // before any request. A consumer whose path function has side effects needs to know that, so
+    // this asserts the whole sequence instead of the last call — and the refused id is absent.
+    expect(seen).toEqual(["probe"]);
+
+    // An accepted id does reach it, unchanged.
+    seen.length = 0;
+    const ok = stub(() => json({ ...MENU, app: "a.b~c" }));
+    // Read, not awaited bare: an over-broad rule refuses `a.b~c`, and a bare `await` would report
+    // the rule's own error instead of the assertion that names the behaviour. Measured: with `~`
+    // dropped from the set, this test failed with that `RangeError` and `seen` was never compared.
+    const outcome = await transport({
+      fetch: ok.fetchDouble,
+      paths: { permissions: (encodedApp) => {
+        seen.push(encodedApp);
+        return `/authz/${encodedApp}/menu`;
+      } },
+    })
+      .fetchPermissions("a.b~c")
+      .then(() => "sent", (e: unknown) => `${(e as Error).name}: ${(e as Error).message}`);
+
+    expect([outcome, seen]).toEqual(["sent", ["probe", "a.b~c"]]);
+    expect(ok.calls[0]!.url).toBe("https://example.test/api/authz/a.b~c/menu");
   });
 
-  it("the same id in the DEFAULT path is encoded too", async () => {
+  it("the DEFAULT path applies the same rule", async () => {
     const s = stub(() => json({ ...MENU, app: "a?b#c" }));
-    await transport({ fetch: s.fetchDouble }).fetchPermissions("a?b#c");
-    expect(s.calls[0]!.url).toBe("https://example.test/api/me/apps/a%3Fb%23c/permissions");
+    const outcome = await transport({ fetch: s.fetchDouble })
+      .fetchPermissions("a?b#c")
+      .then(() => "sent", (e: unknown) => (e as Error).name);
+
+    expect(outcome).toBe("RangeError");
+    expect(s.calls).toEqual([]);
   });
 
   /*
@@ -663,35 +721,85 @@ describe("the routes are configuration, with today's values as defaults", () => 
   });
 });
 
-/* 8 — the ids that cannot be a path segment ------------------------------- */
+/* 8 — the ids an application id may not be ------------------------------- */
 
 /*
- * `encodeURIComponent` leaves a dot alone, and the URL parser resolves dot segments before the
- * request goes out — so `..` used to leave for one route up, WITH the Authorization header, and `.`
- * used to collapse its own segment. Encoding them does not help: the parser decodes first. The only
- * faithful answer is to refuse them, and the empty string with them, since it occupies no segment at
- * all.
+ * The rule is a whitelist: an id is a non-empty sequence of RFC 3986 `unreserved` characters —
+ * letters, digits, "-", ".", "_", "~" — and is not exactly "." or "..".
+ *
+ * It replaced a list of four forbidden values, and the reason it replaced it is that the list kept
+ * growing by measurement: first "..", ".", "", then "/", and then a reverse proxy turned out to hand
+ * a Servlet container "..;" as a path of its own. What a URI segment ADMITS is much wider than what
+ * is safe — it admits ";" and "=" precisely so that authors can delimit parameters inside a
+ * segment — and enumerating the unsafe half is a race nobody wins.
  */
-describe("an application id that cannot be a path segment is refused", () => {
+describe("an application id outside the unreserved set is refused", () => {
   /*
-   * EVERY REFUSED VALUE, THROUGH EVERY DOOR. Four values x two calls x three route shapes (default,
-   * a configured permissions path, a configured decisions path). Anything less left real bypasses
-   * green: a refusal that covered only ".." on the default path passed the whole suite, and so did a
-   * configured decisions path that encoded the id itself instead of going through `segment`.
+   * EVERY REFUSED ID, THROUGH EVERY DOOR. Each id x two calls x three configurations (no `paths`, a
+   * permissions path, a decisions path). Anything less left real bypasses green: a refusal that
+   * covered only ".." on the default path passed the whole suite, and so did a configured path that
+   * encoded the id itself instead of going through the rule.
    *
-   * `s.calls` empty is the assertion that names the harm — the old behaviour was a request that LEFT,
-   * with the Authorization header on it.
+   * The ids are the ones that MOTIVATED the rule and not single characters, and that distinction is
+   * the point: narrowing the old rule from "contains a slash" to `=== "/"` left the suite green,
+   * because the only slash it tested was the bare one. Each entry below says why its value is
+   * refused; where the reason is a measurement, it names the door it was measured behind.
+   *
+   * `s.calls` empty is the assertion that names the harm — the old behaviour was a request that
+   * LEFT, with the Authorization header on it.
    */
-  const REFUSED = ["..", ".", "", "/"] as const;
-  const DOORS = [
-    ["default path", {}],
-    ["configured permissions path", { paths: { permissions: (a: string) => `/authz/${a}/menu` } }],
-    ["configured decisions path", { paths: { decisions: (a: string) => `/authz/${a}/may` } }],
+  const REFUSED = [
+    ["", "occupies no segment at all"],
+    [".", "the URL parser collapses the segment"],
+    ["..", "the URL parser walks one route up"],
+    ["/a", "a leading separator"],
+    ["a/", "a trailing separator"],
+    ["a/b", "two segments where the guarantee promises one"],
+    ["../secret", "the route the proxy measurement reached"],
+    ["../..", "two routes up"],
+    [
+      "..;",
+      "behind a door that decodes %3B, a Servlet container strips the parameter and walks up",
+    ],
+    ["a;b", "behind a door that decodes %3B, a Quarkus backend reads the application as a"],
+    ["a?b", "everything after it is a query string"],
+    ["a#b", "everything after it is a fragment and never leaves the client"],
+    ["a b", "a space has no meaning in a path"],
+    ["a@b", "userinfo syntax"],
+    ["a:b", "scheme syntax"],
+    ["%2e%2e", "a percent sign is outside the set, and in a URL %2e%2e is a dot segment"],
+    ["%2f", "a percent sign is outside the set, and nginx with a URI part decodes %2F"],
+    ["a%b", "an incomplete escape"],
+    ["ñ", "outside ASCII, and unreserved is an ASCII set"],
+    ["a+b", "a sub-delim, and + is a space in a query"],
   ] as const;
 
-  for (const [door, over] of DOORS) {
-    for (const id of REFUSED) {
-      it(`${JSON.stringify(id)} is refused on fetchPermissions via the ${door}, and NOTHING is sent`, async () => {
+  /*
+   * THE DOOR LABELS NAME WHAT THE CALL ACTUALLY CROSSES, and the third row is why that needs saying.
+   * Configuring `paths.decisions` does not change where `fetchPermissions` goes: that call still uses
+   * the DEFAULT permissions path. An ancestor of this block generated names like "fetchPermissions via
+   * the configured decisions path" for exactly that combination — a name promising a route the call
+   * never took, which reads in a report as coverage that does not exist. The combination is worth
+   * keeping (a config carrying a `paths` object at all must not move the refusal), so each door
+   * carries ONE label per call and each label says which path that call takes.
+   */
+  const DOORS = [
+    [{}, "the default permissions path", "the default decisions path"],
+    [
+      { paths: { permissions: (a: string) => `/authz/${a}/menu` } },
+      "a configured permissions path",
+      "the default decisions path, with a permissions path configured",
+    ],
+    [
+      { paths: { decisions: (a: string) => `/authz/${a}/may` } },
+      "the default permissions path, with a decisions path configured",
+      "a configured decisions path",
+    ],
+  ] as const;
+
+  for (const [over, onPermissions, onDecisions] of DOORS) {
+    for (const [id, why] of REFUSED) {
+      it(`${JSON.stringify(id)} is refused by fetchPermissions on ${onPermissions} (${why}), and NOTHING is sent`, async () => {
         const s = stub(byRoute());
         const outcome = await transport({ fetch: s.fetchDouble, ...over })
           .fetchPermissions(id)
@@ -701,7 +809,7 @@ describe("an application id that cannot be a path segment is refused", () => {
         expect(s.calls).toEqual([]);
       });
 
-      it(`${JSON.stringify(id)} is refused on fetchDecisions via the ${door}, and NOTHING is sent`, async () => {
+      it(`${JSON.stringify(id)} is refused by fetchDecisions on ${onDecisions} (${why}), and NOTHING is sent`, async () => {
         const s = stub(byRoute());
         const outcome = await transport({ fetch: s.fetchDouble, ...over })
           .fetchDecisions(id, REQUEST)
@@ -714,18 +822,12 @@ describe("an application id that cannot be a path segment is refused", () => {
   }
 
   /*
-   * THE OTHER HALF, and it is the one that keeps the refusal honest: only three values are refused.
-   * An id that merely LOOKS dangerous is encoded and sent, because it does not escape — measured
-   * against a real server for every one of these.
+   * THE OTHER HALF, and it is the one that keeps the rule from being over-broad: an id made of
+   * unreserved characters is sent, however alarming it looks. "..." and "a..b" contain dots and are
+   * not dot segments; "~" and "-" and "_" are in the set.
    */
-  it("ids that look dangerous but stay in their segment are still sent, encoded", async () => {
-    for (const [id, encoded] of [
-      ["...", "..."],
-      ["a..b", "a..b"],
-      ["%2e%2e", "%252e%252e"],
-      ["a?b", "a%3Fb"],
-      ["a b", "a%20b"],
-    ] as const) {
+  it("ids made of unreserved characters are sent, and reach the wire unchanged", async () => {
+    for (const id of ["...", "a..b", "app-a", "app_a", "app.a", "app~a", "A9", "~-._", "a.b.c"] as const) {
       const s = stub(() => json({ ...MENU, app: id }));
       // The outcome is READ and not awaited bare: a refusal must fail the assertion that names the
       // behaviour, not prevent it from running. An over-broad refusal used to reject here and the
@@ -735,7 +837,128 @@ describe("an application id that cannot be a path segment is refused", () => {
         .then(() => "sent", (e: unknown) => `${(e as Error).name}: ${(e as Error).message}`);
 
       expect([id, outcome]).toEqual([id, "sent"]);
-      expect(s.calls[0]?.url).toBe(`https://example.test/api/me/apps/${encoded}/permissions`);
+      // UNCHANGED, not "encoded": every unreserved character survives encodeURIComponent untouched,
+      // so for every id this rule accepts the encoder is the identity. That is the whole of what a
+      // test can now claim about it — see the encoder test below.
+      expect(s.calls[0]?.url).toBe(`https://example.test/api/me/apps/${id}/permissions`);
+    }
+  });
+
+  /*
+   * WHAT THE ENCODER CAN STILL BE HELD TO, and what it cannot.
+   *
+   * Every id the rule accepts passes through `encodeURIComponent` unchanged, so the encoder produces
+   * no observable difference for any accepted value. The claim that IS testable is the identity one:
+   * output equals input, for every accepted id. It is worth asserting because it is not vacuous —
+   * `escape`, one of the plausible wrong encoders, turns "~" into "%7E" and this catches it.
+   *
+   * What no test can claim any more: that the encoder is `encodeURIComponent` rather than
+   * `encodeURI`, or rather than nothing at all. Measured over the whole unreserved alphabet, the
+   * three produce identical output, so those mutants are EQUIVALENT and not covered. The encoder
+   * stays as defence in depth for the day someone widens the rule — and this comment is here so that
+   * whoever widens it knows the encoder has no witness beyond identity.
+   */
+  it("for every accepted id the encoder is the identity", async () => {
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+    for (const ch of alphabet) {
+      const id = `x${ch}`;
+      const s = stub(() => json({ ...MENU, app: id }));
+      // Read, not awaited bare, for the reason given in the segment block above: an over-broad rule
+      // refuses `x.` and `x-`, and a bare `await` would report the rule's own error instead of
+      // failing the identity assertion.
+      const outcome = await transport({ fetch: s.fetchDouble })
+        .fetchPermissions(id)
+        .then(() => "sent", (e: unknown) => `${(e as Error).name}: ${(e as Error).message}`);
+
+      expect([id, outcome, s.calls[0]?.url]).toEqual([
+        id,
+        "sent",
+        `https://example.test/api/me/apps/${id}/permissions`,
+      ]);
+    }
+  });
+
+  /*
+   * THE MESSAGE NAMES THE RULE, not the category of the value. Someone who reads it should learn
+   * what an id may contain, because the thrown error is the only channel this package has — through
+   * a core session nothing is printed at all.
+   */
+  it("the error names the rule", async () => {
+    const message = await transport({})
+      .fetchPermissions("a/b")
+      .then(() => "sent", (e: unknown) => (e as Error).message);
+
+    expect(message).toContain("unreserved");
+    expect(message).toContain('"-", ".", "_", "~"');
+    expect(message).toContain('must not be "." or ".."');
+  });
+
+  /*
+   * A VALUE THAT IS NOT A STRING IS REFUSED TOO, and the reason is how the rule reads it: the
+   * pattern converts its argument to a string, the dot check compares the value itself. Before the
+   * `typeof` check, `[".."]` passed the first as ".." and failed the second, and was sent one route
+   * up with the Authorization header on it; `undefined` and `null` were sent as "undefined" and
+   * "null". The type forbids every value below, and a JavaScript caller is not bound by the type.
+   *
+   * The last entry is the one that could tell `encodeURIComponent` from `encodeURI` or from no
+   * encoder at all, by answering the pattern with one string and the encoder with another. Refusing
+   * it is what makes those mutants equivalent rather than merely untested.
+   */
+  const unstable = (): string => {
+    let reads = 0;
+    return { toString: () => (reads++ === 0 ? "app-a" : "a/b") } as unknown as string;
+  };
+  const NOT_STRINGS: readonly (readonly [string, () => unknown])[] = [
+    ["undefined", () => undefined],
+    ["null", () => null],
+    ["a number", () => 42],
+    ['the array [".."]', () => [".."]],
+    ['the array ["."]', () => ["."]],
+    ['the String object new String("..")', () => new String("..")],
+    ["an object whose string form changes after the rule reads it", unstable],
+  ];
+
+  for (const [what, make] of NOT_STRINGS) {
+    it(`${what} is refused on both calls, and NOTHING is sent`, async () => {
+      const s = stub(byRoute());
+      const t = transport({ fetch: s.fetchDouble });
+      const outcomes = [
+        await t
+          .fetchPermissions(make() as string)
+          .then(() => "sent", (e: unknown) => (e as Error).name),
+        await t
+          .fetchDecisions(make() as string, REQUEST)
+          .then(() => "sent", (e: unknown) => (e as Error).name),
+      ];
+
+      expect([what, outcomes]).toEqual([what, ["RangeError", "RangeError"]]);
+      expect(s.calls).toEqual([]);
+    });
+  }
+
+  /*
+   * CASE PASSES BOTH WAYS, and it is a decision rather than an oversight: it is not this package's
+   * place to impose a naming style on consumers it does not know.
+   *
+   * Where it bites is documented in the transport's doc comment: the core compares `menu.app !== app`
+   * exactly, so an id differing only in case is a DIFFERENT application. A backend that normalises
+   * case makes the core discard the answer and leave the screen unavailable, printing nothing —
+   * measured through a core session, which reports `LOADING` then `UNAVAILABLE` and no reason.
+   */
+  it("case is accepted both ways", async () => {
+    for (const id of ["commonCatalogs", "CommonCatalogs", "COMMONCATALOGS"] as const) {
+      const s = stub(() => json({ ...MENU, app: id }));
+      // Read, not awaited bare, for the same reason as above: a rule narrowed to lower case refuses
+      // two of these, and this must fail on the assertion, not on the rule's own `RangeError`.
+      const outcome = await transport({ fetch: s.fetchDouble })
+        .fetchPermissions(id)
+        .then(() => "sent", (e: unknown) => `${(e as Error).name}: ${(e as Error).message}`);
+
+      expect([id, outcome, s.calls[0]?.url]).toEqual([
+        id,
+        "sent",
+        `https://example.test/api/me/apps/${id}/permissions`,
+      ]);
     }
   });
 });
@@ -744,16 +967,23 @@ describe("an application id that cannot be a path segment is refused", () => {
 
 describe("the decisions request declares its content type", () => {
   /*
-   * THE COMPLETE SET, with strict equality, on BOTH calls. `toBeUndefined` on one key was not enough:
-   * a lower-case `content-type` on the GET, or the key present with the value `undefined`, both
-   * passed the whole suite — and on the wire the GET carried a content type in each case. What the
-   * request actually sends is the whole record, so the whole record is what is asserted.
+   * THE COMPLETE SET, on BOTH calls, with `toStrictEqual` and not `toEqual`.
+   *
+   * `toBeUndefined` on one key was not enough: a lower-case `content-type` on the GET, or the key
+   * present with the value `undefined`, both passed the whole suite — and on the wire the GET carried
+   * a content type in each case. What the request actually sends is the whole record, so the whole
+   * record is what is asserted.
+   *
+   * And `toEqual` was not enough either, which is the part that had to be measured rather than
+   * assumed: it IGNORES keys whose value is `undefined`. Adding an extra header with that value
+   * passed all of these, and `fetch` put it on the wire as the string "undefined".
+   * `toStrictEqual` compares the key sets.
    */
   it("the POST sends exactly these headers", async () => {
     const s = stub(() => json(SET));
     await transport({ fetch: s.fetchDouble }).fetchDecisions(APP, REQUEST);
 
-    expect(headersOf(s.calls[0]!.init)).toEqual({
+    expect(headersOf(s.calls[0]!.init)).toStrictEqual({
       Accept: "application/json",
       "Content-Type": "application/json",
       Authorization: "Bearer tok-123",
@@ -765,9 +995,12 @@ describe("the decisions request declares its content type", () => {
     await transport({ fetch: s.fetchDouble }).fetchPermissions(APP);
 
     const sent = headersOf(s.calls[0]!.init);
-    expect(sent).toEqual({ Accept: "application/json", Authorization: "Bearer tok-123" });
-    // Strict equality already forbids it; this says the reason out loud, because the two mutations
-    // that slipped through were a lower-case key and a key whose value was `undefined`.
+    expect(sent).toStrictEqual({ Accept: "application/json", Authorization: "Bearer tok-123" });
+    // Redundant with the strict assertion above, and kept as a statement rather than as a witness:
+    // `toStrictEqual` already fails on any extra key, and measured, removing this line changes no
+    // outcome — a lower-case `content-type` and a `Content-Type` valued `undefined` both go red at
+    // the line above with or without it. It names the spelling that slipped through twice while the
+    // assertion was `toEqual`.
     expect(Object.keys(sent).map((k) => k.toLowerCase())).not.toContain("content-type");
   });
 
@@ -775,7 +1008,7 @@ describe("the decisions request declares its content type", () => {
     const s = stub(byRoute({ contextId: CTX }));
     await withContext({ fetch: s.fetchDouble }).fetchDecisions(APP, REQUEST);
 
-    expect(headersOf(s.calls[0]!.init)).toEqual({
+    expect(headersOf(s.calls[0]!.init)).toStrictEqual({
       Accept: "application/json",
       Authorization: "Bearer tok-123",
       "X-Context-Id": CTX,

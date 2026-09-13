@@ -77,28 +77,33 @@ export interface HttpTransportConfig {
    * <h3>`encodedApp` arrives PERCENT-ENCODED, and that is the whole point of the parameter's name</h3>
    *
    * **Interpolate it and nothing else.** The package encodes the application id with
-   * `encodeURIComponent` before your function sees it, and **four ids that encoding cannot make safe
-   * are REFUSED outright**, with a `RangeError` and no request sent: `".."`, `"."`, `""` and any id
-   * containing `/`. The refusal runs before your function is called, so a configured path cannot walk
-   * around it. Had the raw id been passed instead, that guarantee would have moved to you silently,
-   * and forgetting to encode is the ordinary mistake.
+   * `encodeURIComponent` before your function sees it, and an id that is not **a non-empty sequence
+   * of RFC 3986 `unreserved` characters** — `ALPHA / DIGIT / "-" / "." / "_" / "~"` — or that is
+   * exactly `"."` or `".."`, is **REFUSED outright**, with a `RangeError` and no request sent. The
+   * refusal runs before your function is called, so a configured path cannot walk around it. Had the
+   * raw id been passed instead, that guarantee would have moved to you silently, and forgetting to
+   * encode is the ordinary mistake.
    *
-   * ⚠️ **What is guaranteed, and where it stops: the segment in the URL THIS PACKAGE CONSTRUCTS.**
-   * An id occupies exactly one segment of that URL. What a reverse proxy does with it afterwards is
-   * outside this package's reach: 📐 measured against `nginx 1.29.3` with
+   * **What is guaranteed, and where it stops: the segment in the URL THIS PACKAGE CONSTRUCTS.**
+   * An id occupies exactly one segment of that URL. What a front door does with it afterwards is
+   * outside this package's reach — measured against `nginx 1.29.3` with
    * `proxy_pass http://upstream/api/;`, `%2F` is decoded and the dot segments re-resolved, so before
-   * the `/` refusal existed `"../secret"` left here as `/api/me/apps/..%2Fsecret/permissions` and the
-   * upstream received `/api/me/secret/permissions`, with the `Authorization` header. `%5C` was NOT
-   * decoded by that proxy, which is why `\` is not refused and `/` is.
+   * the rule existed `"../secret"` left here as `/api/me/apps/..%2Fsecret/permissions` and the
+   * upstream received `/api/me/secret/permissions`, with the `Authorization` header. What changed is
+   * the input and not the guarantee: **an accepted id can contain no `/`, no `;`, no `%` and nothing
+   * outside ASCII**, so the transformations those doors perform have nothing to act on. The package
+   * README has the six configurations measured, including why `AllowEncodedSlashes NoDecode` is not
+   * the way out.
    *
-   * **Do not encode it again.** ⚠️ **For an ordinary id it changes nothing**:
-   * `encodeURIComponent("app-a")` is `"app-a"` and encoding it twice is still `"app-a"`, so a
-   * suite whose ids are all ordinary never sees the mistake. For an id with a `/`, a space or an
-   * accent it produces `%252F`, `%2520` or `%25C3%25B1` and a route your backend does not
-   * recognise — **and nothing announces that either.** Through a session a double-encoded
-   * `permissions` path shows `UNAVAILABLE`, or `NO_ACCESS_IN_APP` from a backend that answers `403`
-   * for an application it does not know; a double-encoded `decisions` path shows `READY` with every
-   * decision denied. Nothing is printed in any of those cases.
+   * **Do not encode it again.** **Measured: over the 66 characters the rule admits,
+   * `encodeURIComponent` alters none**, so for every id this transport is given it is the
+   * identity — and so is applying it twice. The `%252F` that a `/` used to produce cannot happen,
+   * because a `/` never gets here. **The mistake is unreachable, not harmless**: it is the rule
+   * keeping it unreachable, and one widening
+   * away from mattering again. What it costs when it is reachable, measured through a session: a
+   * double-encoded `permissions` path shows `UNAVAILABLE`, or `NO_ACCESS_IN_APP` from a backend that
+   * answers `403` for an application it does not know; a double-encoded `decisions` path shows
+   * `READY` with every decision denied. Nothing is printed in any of those cases.
    *
    * <h3>What is rejected, and when</h3>
    *
@@ -113,11 +118,11 @@ export interface HttpTransportConfig {
    *   not a string, the probe concludes nothing: a function that looks its path up by id is entitled
    *   not to know a value it has never been given.
    * - **At call time**, every path is checked before it is used, and a bad one is a `RangeError`
-   *   naming which option produced it — **for whoever called this transport**. ⚠️ Read the next
-   *   paragraph before relying on that: through the core, nobody is told anything, and the two paths
-   *   fail differently.
+   *   naming which option produced it — **for whoever called this transport**. Read the next
+   *   paragraph before relying on that, because it is the part that bites: through the core, nobody
+   *   is told anything, and the two paths fail differently.
    *
-   * <h3>⚠️ What a call-time path error looks like from ABOVE</h3>
+   * <h3>What a call-time path error looks like from ABOVE</h3>
    *
    * **Nothing names it.** Neither this package nor the core has a diagnostic channel — the core says
    * so about itself, and no published code of any of the three packages calls `console`. The
@@ -125,7 +130,7 @@ export interface HttpTransportConfig {
    * directly; through `createAuthorizationSession` it is caught and turned into state, and nothing is
    * printed anywhere.
    *
-   * 📐 And the two options do not fail alike. Measured through a real core session, with a path that
+   * And the two options do not fail alike. Measured through a real core session, with a path that
    * passes the construction probe and fails for the real id, against a backend that permits `read`
    * on `r-1`:
    *
@@ -134,7 +139,7 @@ export interface HttpTransportConfig {
    *     paths.permissions  UNAVAILABLE     PERMIT                   0
    *     paths.decisions    READY           DENY                     0
    *
-   * 🔴 **A wrong `paths.decisions` is the dangerous one.** The menu loads, so the screen is `READY`
+   * **A wrong `paths.decisions` is the dangerous one.** The menu loads, so the screen is `READY`
    * and complete; the decision call's chunk rejects, a rejected chunk contributes nothing by the
    * core's own fail-closed contract, and what is absent reads as a denial. **The result is a working
    * screen where everything is denied, indistinguishable from a real denial.** A wrong
@@ -149,7 +154,7 @@ export interface HttpTransportConfig {
    * application id you will use**, not one. A lookup that knows `app-a` and forgot `app-b` passes
    * construction, answers `app-a` correctly and fails for `app-b` alone.
    *
-   * <h3>⚠️ A path is not a place to put a secret</h3>
+   * <h3>A path is not a place to put a secret</h3>
    *
    * The route travels into every message this transport throws — `` `${route}: responded 403` `` and
    * the rest. That is deliberate and documented: the message is built from the route and the status
@@ -194,6 +199,22 @@ export interface HttpTransportConfig {
  * - **One without the other:** rejected at construction with a `RangeError` naming which is
  *   missing. A header name with nothing to put in it, or an id with nowhere to send it, is a
  *   configuration mistake, and discovering it as a `401` costs far more than discovering it here.
+ *
+ * <h2>Across origins in a browser, your backend must allow the `Content-Type` header</h2>
+ *
+ * The decisions request sends `Content-Type: application/json`, which is not a CORS-safelisted value,
+ * so **the decisions call is preflighted in all four combinations of a token and the context
+ * pair** — including the one with neither, where the content type is the only reason an `OPTIONS`
+ * happens at all. Measured in Chrome 152 and Firefox 151 through a session: a backend whose
+ * `Access-Control-Allow-Headers` does not name `Content-Type`, or that does not answer `OPTIONS`,
+ * fails the preflight — and **nothing says so.** The menu request carries no content type and still
+ * loads, so the screen reaches `READY` with every decision reading `DENY`, for pairs the backend
+ * permits. Same-origin, neither browser sent an `OPTIONS` in any configuration.
+ *
+ * This warning is here, on a type a consumer hovers, and not only in the source: the fix is a change
+ * to a deployment's CORS configuration, and the symptom — a working screen that denies everything —
+ * gives no reason to go looking for it. The measurements behind it are in the source, next to the
+ * line that sets the header.
  */
 export function createHttpTransport(config: HttpTransportConfig): AuthorizationTransport {
   const { baseUrl, contextId, contextHeader, getToken, classifyError } = config;
@@ -229,7 +250,7 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
     // THE REQUEST THAT HAS A BODY SAYS WHAT THE BODY IS, and only that one. `body` is a string, so
     // without this the platform labels it `text/plain;charset=UTF-8`.
     //
-    // 📐 Measured against a real server before this line existed: the POST arrived as
+    // Measured against a real server before this line existed: the POST arrived as
     // `content-type: text/plain;charset=UTF-8`, a backend that requires JSON answered `415`, the
     // chunk was dropped, and the session sat at `READY` with zero decisions and `DENY` for a pair
     // the backend would have permitted — the working screen with everything denied that this file
@@ -237,7 +258,7 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
     //
     // Keyed on the body and not on the method so that a future route with a body cannot forget it.
     //
-    // 🔴 IN A BROWSER, ACROSS ORIGINS, THIS AFFECTS ALL FOUR CONFIGURATIONS. 📐 Measured in Chrome
+    // IN A BROWSER, ACROSS ORIGINS, THIS AFFECTS ALL FOUR CONFIGURATIONS. Measured in Chrome
     // 152 and Firefox 151, page and backend on different origins, through a session: in the first
     // three the preflight now asks for `content-type` beside `Authorization` or the context header,
     // and a backend whose `Access-Control-Allow-Headers` names only those two fails it; in the
@@ -248,7 +269,11 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
     // content type and still loads, so the screen is `READY` and every decision reads `DENY`, for
     // pairs the backend permits too. With `Content-Type` among the allowed headers all four answered
     // what the backend said; same-origin, neither browser sent an `OPTIONS` in any configuration.
-    // The README says it where a consumer will look for it.
+    //
+    // The measurements stay here; the ACTIONABLE half is stated on {@link createHttpTransport}, which
+    // is a doc comment and therefore reaches `index.d.ts` and a consumer's hover. This is a `//`
+    // comment inside a function body: it reaches the source map and nothing else. The README says it
+    // too, where a consumer will look for it.
     if (hasBody) {
       out["Content-Type"] = "application/json";
     }
@@ -366,31 +391,59 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
 }
 
 /**
+ * The characters an application id may contain: RFC 3986 `unreserved`.
+ *
+ * `ALPHA / DIGIT / "-" / "." / "_" / "~"`, and nothing else. The name is the standard's; the set has
+ * been called `unreserved` since 2005 and means precisely "safe anywhere in a URI, with no encoding
+ * and no interpretation".
+ *
+ * **A whitelist and not a blacklist, and that is the decision.** The four literals this replaced
+ * — `""`, `"."`, `".."` and "contains `/`" — each named a value someone had measured harmful, which
+ * left every character nobody had thought to measure permitted by default. That default is how `;`
+ * got through: behind `nginx` with a URI part, `"..;"` reached a Servlet container as
+ * `/me/permissions` **with the `Authorization` header**, because a container strips `;parameters`
+ * from a segment before normalising it — the same damage that motivated refusing `/`, through a
+ * character nobody had listed. A whitelist has no such default. What it costs is that an id outside
+ * the set is refused whether or not it would have been harmful, and the price was measured: over a
+ * 75-id battery, **33 ids stopped being sent, 0 started being sent, and no URL of an accepted id
+ * changed** — the rule only ever closes.
+ *
+ * Case passes both ways, and that is deliberate: see the note on case in `segment`.
+ */
+const unreserved = /^[A-Za-z0-9._~-]+$/;
+
+/**
  * A path segment: refused if it cannot be one, percent-encoded if it can.
  *
- * <h3>Encoding, which handles almost everything</h3>
+ * <h3>The refusal, and what it used to be</h3>
  *
- * `encodeURIComponent` and not `encodeURI`: the latter leaves `/` and `?` alone, which is exactly
- * how an identifier escapes its segment and reaches a route nobody meant to call.
+ * `encodeURIComponent` leaves a dot alone, and the platform's URL parser resolves dot segments
+ * **before the request goes out**. Measured against a real HTTP server on the default path, and
+ * behind `nginx 1.29.3` with `proxy_pass http://upstream/api/;`:
  *
- * <h3>⚠️ And the three values encoding cannot handle, which are REFUSED</h3>
+ *     id            sent as                               direct server got        behind that nginx  now
+ *     ------------  ------------------------------------  -----------------------  -----------------  -------
+ *     ".."          /api/me/apps/../permissions           /api/me/permissions      same               REFUSED
+ *     "."           /api/me/apps/./permissions            /api/me/apps/permissions same               REFUSED
+ *     ""            /api/me/apps//permissions             unchanged                /api/me/apps/...   REFUSED
+ *     "a/b"         /api/me/apps/a%2Fb/permissions        unchanged                a/b, two segments  REFUSED
+ *     "../secret"   /api/me/apps/..%2Fsecret/permissions  unchanged                /api/me/secret/..  REFUSED
+ *     "../.."       /api/me/apps/..%2F../permissions      unchanged                /api/permissions   REFUSED
+ *     "..;"         /api/me/apps/..%3B/permissions        unchanged                ..; decoded        REFUSED
+ *     "a\b"         /api/me/apps/a%5Cb/permissions        unchanged                unchanged          REFUSED
+ *     "..."         /api/me/apps/.../permissions          unchanged                unchanged          sent
+ *     "a..b"        /api/me/apps/a..b/permissions         unchanged                unchanged          sent
  *
- * 📐 `encodeURIComponent` leaves a dot alone, and the platform's URL parser resolves dot segments
- * **before the request goes out**. Measured against a real HTTP server, with the default path:
+ * **The last column is the point, and the last two rows are why the rule is not "no dots".** Only
+ * the exact values `"."` and `".."` are refused as dot segments; `"..."` and `"a..b"` are unreserved
+ * and are sent. A column that used to be here said `escapes: yes/no` and was measured against a
+ * direct server only — which made it wrong for three of its rows behind `nginx` with a URI part.
  *
- *     id     sent as                          the server received             escapes
- *     -----  -------------------------------  ------------------------------  -------
- *     ".."   /api/me/apps/../permissions      /api/me/permissions             yes
- *     "."    /api/me/apps/./permissions       /api/me/apps/permissions        yes
- *     ""     /api/me/apps//permissions        /api/me/apps//permissions       no
- *     "..."  /api/me/apps/.../permissions     /api/me/apps/.../permissions    no
- *     "a..b" /api/me/apps/a..b/permissions    /api/me/apps/a..b/permissions   no
- *     "a/b"  /api/me/apps/a%2Fb/permissions   /api/me/apps/a%2Fb/permissions  no
+ * Before the refusal, each of those requests left **with the `Authorization` header** toward a
+ * route the caller did not write. The core discarded the answer, because the `app` would not
+ * match — but the request had already happened.
  *
- * 🔴 The request leaves **with the `Authorization` header** toward a route the caller did not write.
- * The core discards the answer, because the `app` will not match — but the request already happened.
- *
- * 📐 **And encoding the dots is not a fix.** The parser percent-decodes before it resolves, so
+ * **And encoding the dots is not a fix.** The parser percent-decodes before it resolves, so
  * `%2e%2e` and `%2E%2E` reach the same `/api/me/permissions` that `..` does. Measured. The only
  * faithful answer is to refuse the value.
  *
@@ -399,6 +452,27 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
  * application. The guarantee this function exists to make is "the id is exactly one segment", and
  * that cannot be said of a value that is none.
  *
+ * <h3>Encoding, which is now defence in depth and says so</h3>
+ *
+ * `encodeURIComponent` and not `encodeURI`: the latter leaves `/` and `?` alone, which is exactly how
+ * an identifier escapes its segment and reaches a route nobody meant to call. **Since the rule
+ * admits only unreserved characters, no accepted id reaches this call with anything to encode** —
+ * it alters 0 of the 66 characters the rule admits. It stays because a whitelist and an encoder
+ * fail differently, and its witness is the test asserting that the encoder is the IDENTITY for every
+ * accepted id: that test kills `escape` (which sends `a%7Eb` for `a~b`), and it is honest about
+ * what it cannot kill — replacing `encodeURIComponent` with `encodeURI` or with nothing at all is an
+ * EQUIVALENT MUTANT over the accepted set, indistinguishable by any test, and stays green.
+ *
+ * <h3>Case, which passes both ways, and where that bites</h3>
+ *
+ * `unreserved` includes both `ALPHA` ranges, so `"App-A"` and `"app-a"` are both accepted — and they
+ * are two DIFFERENT applications. **This package does not normalise case and must not**, because
+ * it is not the component that decides what an application id means: the core compares
+ * `menu.app !== app` exactly, so a backend that lowercases the id in its answer makes the core
+ * discard that answer. Measured through a core session, the screen goes `LOADING` then `UNAVAILABLE`
+ * with no reason printed — the same shape as a backend being down. Sending the id verbatim keeps that
+ * failure the backend's and visible; normalising here would move it into this package and hide it.
+ *
  * <h3>Why here</h3>
  *
  * This is the one place an id becomes a path segment, and it runs BEFORE
@@ -406,17 +480,34 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
  * neither can a future second route. The core builds no URL and has no reason to know that a dot is
  * special in one.
  */
+
 function segment(value: string): string {
   // A `RangeError` and not an `AuthorizationTransportError`: no request was made and nothing is
-  // unavailable. 📐 Through a core session the two are indistinguishable — both give `UNAVAILABLE`,
+  // unavailable. Through a core session the two are indistinguishable — both give `UNAVAILABLE`,
   // both deny, neither prints anything — so the choice rests entirely on the direct caller and on
   // code that catches by type. `AuthorizationTransportError` would tell a consumer's retry logic
   // that a backend is down, about a request that was never sent and can never succeed.
-  if (value === "" || value === "." || value === ".." || value.includes("/")) {
+  //
+  // `typeof` first, and it is the half of the rule the type cannot enforce for a JavaScript caller.
+  // The pattern converts its argument to a string and the dot check compares the value itself, so
+  // without this line the two halves read different things. Measured against a real server, through
+  // this package's own `fetch` call: `[".."]` passed the pattern as ".." and failed `=== ".."`, the
+  // encoder turned it back into "..", and the URL parser sent the request one route up, to
+  // `/me/permissions`, with the `Authorization` header; `undefined` and `null` were sent as the ids
+  // "undefined" and "null". It is also what makes the encoder's equivalent mutants equivalent: with
+  // it, nothing but a string of unreserved characters reaches `encodeURIComponent`.
+  if (typeof value !== "string") {
     throw new RangeError(
-      `the application id ${JSON.stringify(value)} cannot be a path segment: ` +
-        `"." and ".." are resolved away by the URL parser, "" occupies no segment, ` +
-        `and a "/" is a separator that a proxy can decode back into one`,
+      `the application id must be a string of unreserved characters, received ${
+        value === null ? "null" : Array.isArray(value) ? "an array" : typeof value
+      }`,
+    );
+  }
+  if (!unreserved.test(value) || value === "." || value === "..") {
+    throw new RangeError(
+      `the application id ${JSON.stringify(value)} is not usable as a path segment: ` +
+        `an id must be a non-empty sequence of unreserved characters ` +
+        `(letters, digits, "-", ".", "_", "~") and must not be "." or ".."`,
     );
   }
   return encodeURIComponent(value);
@@ -433,9 +524,9 @@ const defaultDecisionsPath = (encodedApp: string): string => `/me/apps/${encoded
  * mistake as a `contextHeader` with no `contextId`: the consumer configured something wrong, and no
  * server was involved.
  *
- * ⚠️ **It names the option to whoever calls this transport directly, and to nobody else.** There is
+ * **It names the option to whoever calls this transport directly, and to nobody else.** There is
  * no diagnostic channel here or in the core, so through a session this error is caught and turned
- * into state — and 📐 measured, the state is not the same for the two options: a wrong permissions
+ * into state — and measured, the state is not the same for the two options: a wrong permissions
  * path gives `UNAVAILABLE`, a wrong decisions path gives `READY` with every decision denied, because
  * a rejected chunk contributes nothing and absence reads as denial. See
  * {@link HttpTransportConfig.paths}.
