@@ -30,7 +30,7 @@ import type { AuthorizationContext, ContextTransport } from "./context.js";
  *   and nothing here suggests re-authenticating.** Sending someone to sign in again because a
  *   decision point was unreachable teaches them that signing in fixes outages, and it does not.
  *
- * ⚠️ **And `UNAVAILABLE` here is not the permissions session's `UNAVAILABLE`.** This one says "the
+ * **And `UNAVAILABLE` here is not the permissions session's `UNAVAILABLE`.** This one says "the
  * context list could not be obtained"; that one says "the menu for a context we are already in could
  * not be obtained", and it arrives nested inside {@link ContextSessionState} `IN_CONTEXT`. Two
  * different screens: one offers no context, the other offers a context whose menu failed.
@@ -117,15 +117,15 @@ export interface ContextSession {
    * this package deliberately has no diagnostic channel, for the same reason `UNAVAILABLE` carries
    * no `reason`.
    *
-   * ⚠️ **A LISTENER CAN BE CALLED MORE THAN ONCE FOR THE SAME TRANSITION, WITH AN EQUAL VALUE.**
+   * **A LISTENER CAN BE CALLED MORE THAN ONCE FOR THE SAME TRANSITION, WITH AN EQUAL VALUE.**
    * Settling into a context notifies twice: the subscription this package holds on the permissions
    * session repaints when that session publishes, and **the activation** repaints again on its own
-   * when `start()` returns. Nothing de-duplicates them. ⚠️ **It is the activation and not the
-   * switch**, so a consumer that never calls `selectContext` is not exempt: 📐 measured on the
+   * when `start()` returns. Nothing de-duplicates them. **It is the activation and not the
+   * switch**, so a consumer that never calls `selectContext` is not exempt: measured on the
    * single-context path, where `start()` activates with no picker and `selectContext` is never
    * called, the sequence is the same and the last value still arrives twice.
    *
-   * 📐 Measured against a real permissions session on every settled status — `READY`,
+   * Measured against a real permissions session on every settled status — `READY`,
    * `NO_ACCESS_IN_APP` and `UNAVAILABLE` alike — so it is a property of the transition and not of
    * one outcome.
    *
@@ -164,7 +164,7 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
   let unsubscribeFromSession: (() => void) | undefined;
 
   /**
-   * 🔴 THE SUPERSESSION PROTOCOL OF THIS PACKAGE, and it exists because the core's does not reach
+   * THE SUPERSESSION PROTOCOL OF THIS PACKAGE, and it exists because the core's does not reach
    * here.
    *
    * **The core's `generation` is a per-session closure variable**, and its own inventory says so:
@@ -187,28 +187,29 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
    * re-check wherever a test happens to fail repeats the method that already failed. **A new
    * `await` in this file is a new row in the table.**
    *
-   * ⚠️ **The last three columns say which superseders each re-check is TESTED against — not which
-   * ones could reach it.** Those were the same list once, on every row, and the suite exercised only
+   * **The last three columns say which superseders each re-check is TESTED against — not which ones
+   * could reach it, and the difference is the one that hides a gap.** Those were the same list once, on every row, and the suite exercised only
    * the select; the `start()` and `close()` bumps could both be deleted with the whole suite green
    * and branch coverage at 100 %. A table that names what could happen and not what is watched is
    * one no reader can find a gap in, so the gaps are written here instead.
    *
-   * ✔ = a mutation of that re-check turns a test of that superseder red. ✗ = nothing does.
+   * `yes` = a mutation of that re-check turns a test of that superseder red. `no` = nothing does.
    * The rejected path of `start` is its own row: it is a separate re-check and it is covered
    * differently.
    *
-   * ⚠️ **Read the ✔ as two mutations, not one.** A cell is ✔ only when some test goes red BOTH with
-   * that row's re-check removed AND with that column's `generation += 1` removed — the first says
-   * which row the witness belongs to, the second says which superseder it actually pins. A test that
-   * supersedes twice goes red under neither bump alone and is evidence for no cell at all; two cells
-   * here carried a ✔ from exactly that defect, and their tests were split so each pins one trigger.
+   * **Read a `yes` as two mutations, not one, or the table says more than it knows.** A cell is `yes`
+   * only when some test goes red BOTH with that row's re-check removed AND with that column's
+   * `generation += 1` removed — the first says which row the witness belongs to, the second says which
+   * superseder it actually pins. A test that supersedes twice goes red under neither bump alone and is
+   * evidence for no cell at all; two cells here carried a `yes` from exactly that defect, and their
+   * tests were split so each pins one trigger.
    *
    *   suspension point                       re-check         start  select  close()
    *   -------------------------------------  ---------------  -----  ------  -------
-   *   start: await listContexts — resolved   before painting    ✔      ✔       ✔
-   *   start: await listContexts — rejected   before painting    ✔      ✔       ✗
-   *   activate: await session.start()        before emitting    ✗      ✔       ✗
-   *   decide: await session.decide(...)      before returning   ✔      ✔       ✔
+   *   start: await listContexts — resolved   before painting    yes    yes     yes
+   *   start: await listContexts — rejected   before painting    yes    yes     no
+   *   activate: await session.start()        before emitting    no     yes     no
+   *   decide: await session.decide(...)      before returning   yes    yes     yes
    *
    * **The file has five `await`s and this table has four rows, and that is the rule holding rather
    * than a row missing.** The two `await activate(...)` calls are each followed by a `return` — one
@@ -216,20 +217,21 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
    * by the rule above they are suspension points followed by nothing. The re-check they are often
    * credited with lives INSIDE `activate`, after `await session.start()`, and that is the third row.
    *
-   * ⚠️ **Each row is about the re-check named in its second column, and not about the guard inside
-   * the `subscribe` callback below.** That one runs on every emission the built session makes; it is
+   * **Each row is about the re-check named in its second column, and not about the guard inside the
+   * `subscribe` callback below.** That one runs on every emission the built session makes; it is
    * not a suspension point and it is not in this table. The two are easy to confuse — they sit
    * fifteen lines apart and both compare `issuedAt` against `generation` — and they have been
    * confused before, in a place that claimed to be measuring one while it neutralised the other.
    *
-   * 💡 **The three ✗ are known gaps, not oversights.** They are the shapes nobody has built a test
+   * **The three `no` cells are known gaps rather than oversights.** They are the shapes nobody has
+   * built a test
    * for: a rejected listing superseded by a `close()`, and the re-check after `await session.start()`
    * superseded by a `start()` or a `close()`. The guard is present on every row — what is missing is
    * a witness, and the row says so rather than implying coverage it does not have. `decide` is the
    * row that matters most and it is the one fully covered.
    *
-   * ⚠️ **And the five combinations below were not gaps of the same size** — which is why two of them
-   * are the two that got witnesses. 📐 Each was reproduced with its own re-check removed, using a
+   * **And the five combinations below were not gaps of the same size** — which is why two of them
+   * are the two that got witnesses. Each was measured: reproduced with its own re-check removed, using a
    * probe whose every answer is SIGNED with the context that produced it — so the
    * label and the answer can be told apart. That signing is the whole reason this paragraph can be
    * trusted: an earlier version of it claimed all five stayed fail-closed, written from a probe
@@ -248,8 +250,8 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
    *   await session.start() x start          IN_CONTEXT       ctx-a   IDLE     answer:ctx-b  -
    *   await session.start() x close()        IN_CONTEXT       ctx-a   IDLE     []            -
    *
-   *   ⚠️ **The last two rows are measured against the REAL core, not against a double**, and the
-   *   menu column used to say `ctx-a` because of that. 📐 Two things about the abandoned session
+   *   **The last two rows are measured against the REAL core, not against a double**, and the
+   *   menu column used to say `ctx-a` because of that. Measured, and two things about the abandoned session
    *   decide the cell, and they are JOINTLY sufficient and individually insufficient — the full 2x2,
    *   both factors, all four combinations:
    *
@@ -270,7 +272,7 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
    *   `LOADING` — a screen that says "still loading" about a context nobody is in. The real core
    *   does both, which is why the rows above read `IDLE`.
    *
-   *   ⚠️ **Why this note is phrased as a conjunction and not as "X makes no difference":** it said
+   *   **Why this note is phrased as a conjunction and not as "X makes no difference":** it said
    *   the latter until the fourth cell was run, on the strength of three cells varied one at a time
    *   from a shared baseline. Three cells of a 2x2 cannot separate an inert factor from an
    *   interacting one, and these two interact. A claim that a factor does not matter needs the cell
@@ -279,7 +281,7 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
    *   The original error overstated the consequence — there is no stale menu on screen — and the
    *   half that matters is unchanged: the label and the answer still disagree.
    *
-   *   - 🔴 **One answers under the wrong label.** The re-check after `await session.start()`
+   *   - **One answers under the wrong label.** The re-check after `await session.start()`
    *     superseded by a `start()`: the state's context id is the abandoned one, **and `decide()`
    *     answers for the new one.** With the real core the nested state is `IDLE` — the abandoned
    *     session was closed and never emitted its menu — so the screen shows the abandoned context's
@@ -291,25 +293,25 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
    *     re-check after `await session.start()` superseded by a `close()`, repaint or keep a context
    *     the subject already left.
    *     Both are fail-closed: `decide()` is empty.
-   *   - 🔴 **Two lock the subject out.** The two where a `listContexts` is superseded by a second
+   *   - **Two lock the subject out.** The two where a `listContexts` is superseded by a second
    *     `start()`: the late answer leaves the context list either **superseded** (the resolved
    *     path — it keeps the stale list) or **emptied** (the rejected path — the late `catch` clears
    *     it after the new start already succeeded). Either way `selectContext()` then raises
    *     `RangeError` **for a context the server does return**, and the only way out is another
    *     `start()`. And in both, `decide()` answers `PERMIT` from the live session while the screen
-   *     offers no way to reach it. 📐 Measured: with the resolved-path re-check removed, a second
+   *     offers no way to reach it. Measured: with the resolved-path re-check removed, a second
    *     start returning `[ctx-c]` leaves the picker showing `[ctx-a, ctx-b]` and
    *     `selectContext("ctx-c")` throwing.
    *
    * That last pair is the shape `NO_ACCESS_IN_APP` carries a context list to avoid — a screen that
    * offers the subject no way out — reached from a different direction. **They are the two the
-   * `start` column now marks ✔**: each has a witness that asserts on `selectContext("ctx-c")`
+   * `start` column now reads `yes`**: each has a witness that asserts on `selectContext("ctx-c")`
    * succeeding after the superseded listing settles, so the test fails on the lockout itself and not
    * on a rejected promise.
    *
    * **A new `await` here is a new row, and a row is not finished until its last three columns are.**
    *
-   * ⚠️ **`close()` on a discarded session is necessary and not sufficient.** It stops that session
+   * **`close()` on a discarded session is necessary and not sufficient.** It stops that session
    * emitting and makes its `decide()` deny — but **a promise this layer already holds keeps
    * resolving**, and this layer would act on it. Close the abandoned session AND re-check.
    *
@@ -409,14 +411,14 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
     // returning the PREVIOUS context in full — its label and its menu — while `decide()` already
     // answers for the new one.
     //
-    // 📐 The core's own session closes that window by itself, and closes it completely: its `start()`
-    // emits `LOADING` before its first `await`, so the subscription just registered repaints in the
-    // SAME SYNCHRONOUS TURN. Measured against the REAL core through this factory, with its
-    // permissions fetch parked: `selectContext()` is called and not awaited, and by the time it
-    // returns its promise the listener has already recorded `IN_CONTEXT/IDLE` from this paint and
-    // `IN_CONTEXT/LOADING` after it. Not one microtask later — none. With the real core the window
-    // never opens at all. It opens only with a consumer session that emits AFTER its first await —
-    // and `buildSession` is the consumer's by design, so this cannot be assumed away.
+    // Measured: the core's own session closes that window by itself, and closes it completely — its
+    // `start()` emits `LOADING` before its first `await`, so the subscription just registered
+    // repaints in the SAME SYNCHRONOUS TURN. Measured against the REAL core through this factory,
+    // with its permissions fetch parked: `selectContext()` is called and not awaited, and by the
+    // time it returns its promise the listener has already recorded `IN_CONTEXT/IDLE` from this
+    // paint and `IN_CONTEXT/LOADING` after it. Not one microtask later — none. With the real core
+    // the window never opens at all. It opens only with a consumer session that emits AFTER its
+    // first await — and `buildSession` is the consumer's by design, so this cannot be assumed away.
     setState({
       status: "IN_CONTEXT",
       contextId: context.contextId,
@@ -449,7 +451,7 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
         // FLAG POSITION and load-bearing in the other one, which is the whole reason a redundant
         // guard is kept.
         //
-        // 📐 Measured by watching the thing the guard protects — what a late subscriber RECEIVES —
+        // Measured by watching the thing the guard protects — what a late subscriber RECEIVES —
         // with a listener that resurrects the session from the final idle state and a second
         // listener that subscribes after `close()` has returned. Four cells:
         //
@@ -468,7 +470,7 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
         // `getState()` returns the resurrected state in both of those cells, so with the flag moved a
         // late reader sees it whatever this branch does. Only the flag's position keeps that closed.
         //
-        // ⚠️ WHY THIS IS PROSE AND NOT A MUTATION ROW. This package's suite cannot tell the last two
+        // WHY THIS IS PROSE AND NOT A MUTATION ROW. This package's suite cannot tell the last two
         // cells apart: no test here watches a late subscriber on a resurrected session, so with the
         // flag moved the same two tests go red, at the same assertions, with or without the branch.
         // The core has such a witness for its own copy of this pair, and even there a comparison of

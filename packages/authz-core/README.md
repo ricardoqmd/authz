@@ -81,11 +81,11 @@ session.close();
 | `NO_ACCESS_IN_APP` | The decision point was reached and said this subject may not enter this application. |
 | `UNAVAILABLE` | **No answer was obtained.** Not an expired session — nothing here suggests re-authenticating. |
 
-⚠️ **`NO_ACCESS_IN_APP` is not a `READY` with an empty menu.** *"You may not enter"* and *"you may
+**`NO_ACCESS_IN_APP` is not a `READY` with an empty menu.** *"You may not enter"* and *"you may
 enter and may do nothing"* are two different screens, and collapsing them is the mistake the type
 prevents.
 
-⚠️ **`UNAVAILABLE` carries no `reason`, on purpose.** The text would come from your transport, which
+**`UNAVAILABLE` carries no `reason`, on purpose.** The text would come from your transport, which
 got it from a server, and this package cannot know what is safe to carry in someone else's error
 string — it would be one `render` away from a screen. Diagnostics belong to the transport, which
 still holds the original error.
@@ -102,8 +102,10 @@ into chunks of at most `maxPairsPerRequest` and every chunk is asked **concurren
 - **The order of the returned array is unspecified.** It is a lookup table: read it with
   `decisionFor`, never by position.
 - A session that has not started, or one that has been closed, answers the empty list.
-- **Cached decisions live until `start()` runs again.** There is no time-to-live and no clock:
-  `start()` clears the cache and the next `decide()` asks the decision point afresh. Until then a
+- **A cached decision is dropped when `start()` or `close()` runs, or when the cache is full.** There
+  is no time-to-live and no clock, but there is a size bound: `maxCachedDecisions` (default 5000)
+  evicts oldest-first, so an entry can go before either call happens. `start()` and `close()` clear
+  the cache outright, and the next `decide()` asks the decision point afresh. Until then a
   decision already obtained is served from memory.
 
 ### `close()`
@@ -122,7 +124,7 @@ sections existed, which actions were available, whether that person was an admin
 package where the menu **is** the permission, that says plenty. Your half is to watch the subject and
 call `close()`.
 
-⚠️ **It cannot cancel a call already in flight** — this package never owned that `fetch`. What it
+**It cannot cancel a call already in flight** — this package never owned that `fetch`. What it
 guarantees is that the answer is thrown away.
 
 ### A listener owns its own errors

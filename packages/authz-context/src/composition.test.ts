@@ -91,7 +91,7 @@ describe("the real core through the factory", () => {
 
     // TWO `IN_CONTEXT/READY`, and they are not a defect of the core: the subscription registered in
     // `activate` repaints when the core emits READY, and `activate` repaints again on its own after
-    // `await session.start()` returns. `setState` does not de-duplicate. 📐 A double faithful to the
+    // `await session.start()` returns. `setState` does not de-duplicate. Measured: a double faithful to the
     // core's emission order produces this exact five-element sequence too, so the real core and the
     // doubles agree here down to the repetition.
     expect(seen).toEqual([
@@ -203,7 +203,7 @@ describe("the real core through the factory", () => {
 
   /*
    * THE OTHER HALF. Every case above is fail-closed: each one asserts that something does NOT reach
-   * the consumer, so an implementation that never answered would satisfy all of them. 📐 That was
+   * the consumer, so an implementation that never answered would satisfy all of them. That was
    * measured, in the past tense on purpose: BEFORE this case existed, a `decide()` returning the
    * empty list forever left all four of them green, and emptying the CORE's `decide()` left this
    * package's entire suite of 46 green. **This case is what changed that.** With it, the same

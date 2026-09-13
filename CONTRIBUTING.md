@@ -71,7 +71,7 @@ takes both packages from `0.0.0` to `0.1.0`:
 | `^0.1.0` | either | `0.1.0` |
 | `>=0.1.0` | either | `0.1.0` |
 
-⚠️ **That table measured the first release and says nothing about any other.** Measured again at the
+**That table measured the first release and says nothing about any other.** Measured again at the
 **second** — a core-only `minor`, with the published range left alone — the experimental flag stops
 being irrelevant and becomes the only thing separating the two outcomes:
 
@@ -106,7 +106,7 @@ warning is the one thing a peer range exists to produce. The range survived by n
 anything. The option that buys this is called
 `___experimentalUnsafeOptions_WILL_CHANGE_IN_PATCH`.
 
-⚠️ **Its one real cost, and it is a checklist item:** a literal range does **not** follow the core by
+**Its one real cost, and it is a checklist item:** a literal range does **not** follow the core by
 itself. **When the core's new version falls outside the range, bump it by hand. While the core is
 `0.x`, that is every minor.** The range lives in `packages/authz-http/package.json`; `workspace:^` did
 that automatically, and this does not. `ROADMAP.md` schedules `v0.2.0` as the next release, which is

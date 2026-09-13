@@ -42,7 +42,7 @@ const session = createContextSession({
 });
 ```
 
-✅ **`buildSession` is yours, and that is the whole composition.** The factory closes over your own
+**`buildSession` is yours, and that is the whole composition.** The factory closes over your own
 transport and binds the context id into it — which is exactly what the HTTP adapter's optional
 `contextId` + `contextHeader` pair exists for. **This package builds no transport and knows no URL.**
 
@@ -57,7 +57,7 @@ interface ContextTransport {
 `getState()` · `subscribe(listener)` · `start()` · `selectContext(id)` · `decide(request)` ·
 `close()`.
 
-⚠️ **The permissions session is never handed out.** A consumer holding one could call `decide` past
+**The permissions session is never handed out.** A consumer holding one could call `decide` past
 this layer's guard, and a guard a layer cannot enforce is not a guard.
 
 ## The state, and why it nests
@@ -72,23 +72,23 @@ this layer's guard, and a guard a layer cannot enforce is not a guard.
 | `IN_CONTEXT` | In a context; `permissions` carries the core session's own state. |
 | `UNAVAILABLE` | **The context list** could not be obtained. Not an expired session — nothing here suggests re-authenticating. |
 
-✅ **`IN_CONTEXT` nests the core's state rather than flattening it.** Flattening would make this
+**`IN_CONTEXT` nests the core's state rather than flattening it.** Flattening would make this
 package re-declare every state the core has, so every state the core ever adds would break this
 package's types. Nested, you ask *which context am I in* and then *what does the permissions session
 say* — the same question in the same order the architecture asks it.
 
-⚠️ **`UNAVAILABLE` here and `UNAVAILABLE` inside `IN_CONTEXT` are different screens.** This one says
+**`UNAVAILABLE` here and `UNAVAILABLE` inside `IN_CONTEXT` are different screens.** This one says
 the context list could not be obtained; that one says a context you are already in has a menu that
 failed. One offers no context, the other offers a context whose menu failed.
 
-✅ **`NO_ACCESS_IN_APP` carries the context list.** That screen used to carry nothing and offer the
+**`NO_ACCESS_IN_APP` carries the context list.** That screen used to carry nothing and offer the
 subject no way out.
 
-⚠️ **A subscriber can be called twice for one transition, with an equal value.** Settling into a
+**A subscriber can be called twice for one transition, with an equal value.** Settling into a
 context emits once when the permissions session publishes and once more when the activation returns,
-and nothing de-duplicates them. **It is the activation, not the switch** — 📐 measured on the
+and nothing de-duplicates them. **It is the activation, not the switch** — measured on the
 single-context path, where `start()` activates with no picker and `selectContext` is never called,
-the last value still arrives twice. One context does not exempt you. 📐 Measured on `READY`,
+the last value still arrives twice. One context does not exempt you. Measured on `READY`,
 `NO_ACCESS_IN_APP` and `UNAVAILABLE` alike: it is the transition, not the outcome. A render function
 tolerates it; a counter, an analytics event or a one-shot navigation does not.
 
@@ -109,7 +109,7 @@ if you need to suppress the repeat.
   that is a programming error. A closed session does not raise it either: inert means inert.
 - **`close()`** closes the active session, emits one final `IDLE` and then drops the listeners.
 
-## 🔴 The seam, and its rule
+## The seam, and its rule
 
 **If you write your own layer on top of the core, you need this protocol too.**
 
@@ -125,7 +125,7 @@ under `ctx-b`'s label.** The session cannot detect it: it does not know what a c
 > and re-check it after every `await` a context change could supersede — before any observable action:
 > emitting, caching, or returning.**
 
-⚠️ **Closing the outgoing session is necessary and not sufficient.** It stops that session emitting and
+**Closing the outgoing session is necessary and not sufficient.** It stops that session emitting and
 makes its `decide()` deny — but **a promise you already hold keeps resolving**, and you will act on it
 unless your own counter says otherwise. Close *and* re-check.
 

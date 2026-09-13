@@ -72,16 +72,19 @@ A header name with nothing to put in it, or an id with nowhere to send it, is a 
 mistake. Rejecting it at construction costs one line; discovering it as a `401` in an environment
 costs an afternoon.
 
-⚠️ Two preconditions on `contextId`, because the symptom of breaking either is an opaque failure
+Two preconditions on `contextId`, because the symptom of breaking either is an opaque failure
 rather than a message: it is sent **as a header value**, so it must be a valid one; and **leading or
 trailing whitespace is not preserved** — the platform trims it on the wire, silently.
 
 The rejection follows the same message discipline as every other one here: **the route and the field,
 never the body, never the token, never the header value.**
 
-Every path segment is percent-encoded, and the four application ids that encoding cannot make safe
-are **refused**, not encoded. **What that guarantees is the segment in the URL this package
-constructs**; what a reverse proxy does with it afterwards is outside its reach. See
+An application id must be a non-empty sequence of **RFC 3986 `unreserved` characters** — letters,
+digits, `-`, `.`, `_`, `~` — and must not be `"."` or `".."`. Anything else is **refused with a
+`RangeError` and no request is sent**; nothing is encoded into safety, because encoding a separator
+only hides it until something downstream decodes it back. **What that guarantees is the segment in the
+URL this package constructs**, and no accepted id contains a character any front door measured here
+transforms, so that segment now survives them too. See
 [Application ids that are refused](#application-ids-that-are-refused).
 
 ## Configuration
@@ -124,18 +127,25 @@ createHttpTransport({
 // GET https://api.example.com/authz/app-a/menu
 ```
 
-⚠️ **`encodedApp` arrives percent-encoded. Interpolate it and nothing else.** This package encodes the
-application id before your function sees it, so an id containing `/` or `?` cannot escape its segment
-and reach a route nobody meant to call. Passing you the raw id would have handed you that guarantee
-without saying so, and forgetting to encode is the ordinary mistake.
+**`encodedApp` arrives percent-encoded, and it has already been through the rule. Interpolate it
+and nothing else.** An id that is not a sequence of unreserved characters never reaches your function
+at all — the refusal runs first, so a configured path cannot walk around it. Passing you the raw id
+would have handed you that job without saying so, and forgetting to encode is the ordinary mistake.
 
-**Do not encode it again.** ⚠️ **For an ordinary id it changes nothing:**
-`encodeURIComponent("app-a")` is `"app-a"`, and encoding it twice is still `"app-a"`, so a suite
-whose application ids are all ordinary will not catch it. For an id with a `/`, a space or an accent
-it produces `%252F`, `%2520` or `%25C3%25B1` and a route your backend does not recognise — **and
-nothing announces that either.** Through a session a double-encoded `permissions` path shows
-`UNAVAILABLE`, or `NO_ACCESS_IN_APP` if your backend answers `403` for an application it does not
-know; a double-encoded `decisions` path shows `READY` with everything denied. Nothing is printed.
+**Do not encode it again** — though what that costs you has changed, and the honest version is worth
+the paragraph. Measured: over the 66 characters the rule admits, `encodeURIComponent` alters **none**, so for
+every id this package will ever hand you it is the identity, and encoding it a second time is the
+identity as well: measured over the whole unreserved set and over eleven accepted ids, **0 differ**.
+The `%252F` a `/` used to produce cannot happen, because a `/` never gets here.
+
+**So the mistake is currently unreachable, not harmless.** It is the rule that is keeping it
+unreachable, and it is one widening away from mattering again — the day an id is allowed to contain
+anything encoding touches, a double-encoded path becomes a route your backend does not recognise, and
+nothing announces it — measured through a session, a double-encoded `permissions` path shows
+`UNAVAILABLE`, or `NO_ACCESS_IN_APP` if your backend answers `403` for an application it does
+not know, and a double-encoded `decisions` path shows `READY` with everything denied. Nothing is
+printed in any of those cases. That is the failure the instruction is worth avoiding, and it is
+why the parameter is still named `encodedApp`.
 
 The returned path is joined to `baseUrl` verbatim, so it must be a non-empty string beginning with
 `/`. A wrong URL built in silence is the one outcome this package refuses, so it is checked twice:
@@ -145,11 +155,11 @@ The returned path is joined to `baseUrl` verbatim, so it must be a non-empty str
 | at construction | each function you give is called **once**, with the probe id `"probe"`. A returned string that does not begin with `/` is a `RangeError` naming the option. If it throws or returns something that is not a string, the probe concludes nothing — a path looked up by id is entitled not to know one it has never been given. |
 | at call time | every path is checked before it is used. A bad one is a `RangeError` naming the option — **to whoever called the transport directly**. See the warning below for what it looks like through a session. |
 
-### ⚠️ What a wrong path looks like from above, and why you must exercise both
+### What a wrong path looks like from above, and why you must exercise both
 
 **Nothing prints anything.** Neither this package nor the core has a diagnostic channel, and no
 published code of either calls `console`. Through `createAuthorizationSession` the `RangeError` is
-caught and turned into state — and the two options do not produce the same state. 📐 Measured through
+caught and turned into state — and the two options do not produce the same state. Measured through
 a real core session, against a backend that permits `read` on `r-1`:
 
 | wrong option | session state | `decisionFor(read, r-1)` | console calls |
@@ -157,7 +167,7 @@ a real core session, against a backend that permits `read` on `r-1`:
 | `paths.permissions` | `UNAVAILABLE` | `PERMIT` | 0 |
 | `paths.decisions` | `READY` | `DENY` | 0 |
 
-🔴 **A wrong `paths.decisions` is the one to fear.** The menu loads, so the screen is `READY` and
+**A wrong `paths.decisions` is the one to fear.** The menu loads, so the screen is `READY` and
 complete. The decision call's chunk rejects; a rejected chunk contributes nothing — that is the core's
 fail-closed contract for any decision failure — and what is absent reads as a denial. **You get a
 working screen where everything is denied, and it is indistinguishable from a real denial.**
@@ -171,79 +181,118 @@ fine, keeps answering normally.
 it **for every application id you will use**, not one. A lookup that knows `app-a` and forgot
 `app-b` passes construction, answers `app-a` correctly and fails for `app-b` alone.
 
-⚠️ **A path is not a place to put a secret.** The route travels into every message this transport
+**A path is not a place to put a secret.** The route travels into every message this transport
 throws, by design — see [Errors](#errors). Whatever you put in the path is part of the route, so a
 token or a key does not belong there. This package cannot prevent it and does not try.
 
 ## Application ids that are refused
 
-Four values are **refused with a `RangeError`, and no request is sent**: `".."`, `"."`, the empty
-string, and **any id containing `/`**. They are not encoded, because encoding does not help — a
-separator survives encoding only until something downstream decodes it back.
+An application id is **refused with a `RangeError`, and no request is sent**, unless it is a non-empty
+sequence of **RFC 3986 `unreserved`** characters — `ALPHA / DIGIT / "-" / "." / "_" / "~"` — and is
+neither `"."` nor `".."`. Nothing outside that set is encoded into safety, because encoding a separator
+only hides it until something downstream decodes it back.
 
-📐 `encodeURIComponent` leaves a dot alone, and the URL parser resolves dot segments before the
-request goes out. Measured against a real HTTP server, on the default path:
+A value that is not a string — `undefined`, `null`, a number, an array — is refused the same
+way. The rule is checked on the value itself and not on its conversion to a string: measured,
+before that check `[".."]` passed as `".."` and the request reached `/me/permissions` with the
+`Authorization` header.
+
+**The rule says what is permitted, not what is dangerous**, and that is the whole reason it is written
+this way. Its four ancestors each named a value that had been measured harmful, which meant every
+character nobody had thought to measure was permitted by default. `unreserved` is the set the standard
+already defines as safe anywhere in a URI with no encoding and no interpretation; a character outside
+it is refused whether or not anyone has measured what a front door does with it.
+
+### What the refused ids used to do
+
+`encodeURIComponent` leaves a dot alone, and the URL parser resolves dot segments before the request
+goes out. Measured against a real HTTP server, on the default path:
 
 | id | sent as | a server reached DIRECTLY received | an upstream behind `nginx proxy_pass .../api/;` received |
 |---|---|---|---|
-| `".."` | `/api/me/apps/../permissions` | `/api/me/permissions` | — |
-| `"."` | `/api/me/apps/./permissions` | `/api/me/apps/permissions` | — |
-| `""` | `/api/me/apps//permissions` | `/api/me/apps//permissions` | — |
+| `".."` | `/api/me/apps/../permissions` | `/api/me/permissions` | `/api/me/permissions` |
+| `"."` | `/api/me/apps/./permissions` | `/api/me/apps/permissions` | `/api/me/apps/permissions` |
+| `""` | `/api/me/apps//permissions` | `/api/me/apps//permissions` | **`/api/me/apps/permissions`** (`merge_slashes`) |
 | `"a/b"` | `/api/me/apps/a%2Fb/permissions` | `/api/me/apps/a%2Fb/permissions` | **`/api/me/apps/a/b/permissions`** |
 | `"../secret"` | `/api/me/apps/..%2Fsecret/permissions` | unchanged | **`/api/me/secret/permissions`** |
 | `"../.."` | `/api/me/apps/..%2F../permissions` | unchanged | **`/api/permissions`** |
+| `"..;"` | `/api/me/apps/..%3B/permissions` | unchanged | `/api/me/apps/..;/permissions` |
+| `"a\b"` | `/api/me/apps/a%5Cb/permissions` | unchanged | unchanged |
 | `"..."` | `/api/me/apps/.../permissions` | unchanged | unchanged |
 | `"a..b"` | `/api/me/apps/a..b/permissions` | unchanged | unchanged |
-| `"a\b"` | `/api/me/apps/a%5Cb/permissions` | unchanged | unchanged |
 
-⚠️ **The column that used to be here said `escapes: yes/no`, and it was measured against a direct
-server only.** A reader took that as a security statement, and behind the common `proxy_pass` form it
-was wrong for three of its rows. The table now names the montage each column measured. The top four
-rows are all refused now; the last three are sent, and `a\b` is in the table because it is the
-measurement that decides where the line is drawn.
+**Every row above the last two is refused now.** The last two are sent: `"..."` and `"a..b"` are
+unreserved, and the rule refuses only the exact values `"."` and `".."`, not dots in general.
 
-🔴 Before the refusal, that request left **with your `Authorization` header**, toward a route you did
-not write. The answer was discarded — the core rejects an `app` that does not match — but the request
-had already happened.
+**A column that used to be here said `escapes: yes/no`, and it was measured against a direct server
+only.** It read as a security statement, and behind `proxy_pass` with a URI part it was wrong for
+three of its rows. The columns now name the setup each one measured, and no cell is `—`.
 
-📐 And encoding the dots is not a fix: the parser decodes before it resolves, so `%2e%2e` and `%2E%2E`
-reach the same `/api/me/permissions` that `..` does. The only faithful answer is to refuse.
+Before the refusal, each of those requests left **with your `Authorization` header**, toward a route
+you did not write. The answer was discarded — the core rejects an `app` that does not match — but the
+request had already happened.
 
-**Why `/` is refused and `\` is not.** 📐 Measured against `nginx 1.29.3` with
-`proxy_pass http://upstream/api/;`: `%2F` is decoded and the dot segments re-resolved, so `"a/b"`
-arrived as two segments and `"../secret"` as `/api/me/secret/permissions` **with the `Authorization`
-header**. `%5C` came through that proxy untouched. An application id containing a separator is always
-a programming error, and until now it failed in the worst way to diagnose: the URL that left the
-browser looked right and the one that reached the backend was a different route. The line is at `/`
-because that is where the measurement is; `\` is not refused because nothing measured turns it back
-into a separator.
-
-⚠️ **And the bound on all of this:** what the package guarantees is **the segment in the URL it
-constructs**. A proxy that percent-decodes `%2F` before resolving dot segments is outside its reach —
-if yours does, `AllowEncodedSlashes NoDecode`, or a `proxy_pass` without a URI part, keeps it intact.
+And encoding the dots is not a fix: measured, the parser decodes before it resolves, so `%2e%2e` and
+`%2E%2E` reach the same `/api/me/permissions` that `..` does. The only faithful answer is to refuse.
 
 The empty id is refused for a different and milder reason: it occupies **no** segment, so
-`/me/apps//permissions` is a differently shaped route rather than a route for an application — and
-this package's guarantee is that the id is exactly one segment.
+`/me/apps//permissions` is a differently shaped route rather than a route for an application — and what
+this package guarantees is that the id is exactly one segment.
 
-**Everything else is sent, encoded.** `"..."`, `"a..b"`, `"%2e%2e"` and `"a/b"` all stay inside their
-segment, and all of them still work.
+### What each front door does, measured
+
+Measured against two reverse proxies, six configurations, with a client that still sent everything:
+
+| id, as sent | `nginx 1.29.3`, `proxy_pass .../api/;` | `nginx`, `proxy_pass` with **no URI part** | Apache 2.4.67, default | `AllowEncodedSlashes On` | `NoDecode` | `NoDecode` + `nocanon` |
+|---|---|---|---|---|---|---|
+| `%2F` | decoded, dot segments re-resolved | intact | **`404`, never arrives** | decoded, as nginx | intact | intact |
+| `%3B` | **decoded to `;`** | intact | **decoded to `;`** | **decoded to `;`** | **decoded to `;`** | intact |
+| `%5C` | intact | intact | intact | intact | intact | intact |
+
+**`AllowEncodedSlashes NoDecode` is not the way out, and this README used to offer it as one.** It
+keeps `%2F` intact and decodes `%3B` anyway. Of everything measured, only **`nocanon`** on Apache
+and a **`proxy_pass` without a URI part** on nginx left every segment untouched.
+
+And a decoded `;` is not cosmetic, because a Servlet container strips `;parameters` from each segment
+**before** normalising the path. Measured: `"..;"` through `nginx` (URI part) into **Tomcat 11.0.22**
+arrives as `pathInfo=/me/permissions` — the escape, **with the `Authorization` header** — and it arrives
+the same way through Apache with `NoDecode`. Directly into Tomcat it stays the literal `..;`. On
+**Quarkus 3.15.0** the route does not move, but the `@PathParam` is a different id: `"..;"` → `app=".."`,
+`"a;b"` → `app="a"`, i.e. **a question about another application**. Neither is reachable now: `;` is not
+unreserved.
+
+**And the bound, which the rule has changed.** What this package guarantees is **the segment in the
+URL it constructs**; what a front door does afterwards has always been outside its reach. What has
+changed is what there is to act on: **an accepted id cannot contain any of the three escapes above** —
+nor a `%` to write one with, nor a space, nor anything outside ASCII — so none of the transformations
+measured here has an input. Measured: all 66 unreserved characters, in 30 accepted ids that include
+`"..."`, `"...."`, `"a..b"`, `"..~"` and `"~.."`, arrived unchanged through all six
+configurations in the table and through a direct connection, each with its `Authorization` header.
+
+**Read that as a consequence of the rule and not as a property of proxies**: the guarantee did not get
+stronger, the input got narrower — and it holds only as long as the rule does. What is not measured:
+IIS, managed load balancers and CDNs. None of the six configurations transformed an *unreserved*
+character; a door that does is outside this bound.
+
+Measured: `%5C` was decoded by neither door in any of the six configurations, and Tomcat 11 answers
+`400` to `%5C` and to a raw `\`. So `\` is refused for the reason the rule gives — it is not
+unreserved — and not because anything measured turned it back into a separator.
 
 ## The decisions request declares its content type
 
 The decisions call sends `Content-Type: application/json`. The permissions call, which has no body,
 sends none.
 
-📐 Before this, the body was a string with no content type, so the platform labelled it
+Before this, the body was a string with no content type, so the platform labelled it
 `text/plain;charset=UTF-8`. Measured against a real server that requires JSON on a `POST`: it answered
 `415`, the chunk was dropped, and the session sat at **`READY` with zero decisions and `DENY`** for a
 pair the backend would have permitted — a working screen with everything denied, indistinguishable
 from a real denial.
 
-🔴 **If you call this from a browser across origins, your backend must allow `Content-Type` in its
+**If you call this from a browser across origins, your backend must allow `Content-Type` in its
 `Access-Control-Allow-Headers` before you update.**
 
-📐 Measured in Chrome 152 and Firefox 151, page and backend on different origins, through a session:
+Measured in Chrome 152 and Firefox 151, page and backend on different origins, through a session:
 
 - **In the first three configurations** the preflight asks for `content-type` beside `Authorization`
   or your context header. A backend whose `Access-Control-Allow-Headers` names only those two fails it.
