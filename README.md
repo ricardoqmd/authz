@@ -26,9 +26,9 @@ are born:
    page — never one request per row.
 
 This library packages those three questions once, together with the parts that are easy
-to get wrong: failing closed, invalidating everything when the active context changes,
-splitting a batch that exceeds the decision endpoint's cap, and keeping several open tabs
-coherent.
+to get wrong: failing closed, invalidating everything when the active context changes, and
+splitting a batch that exceeds the decision endpoint's cap. Keeping several open tabs coherent is
+not in any package yet.
 
 ## Design rules it enforces
 

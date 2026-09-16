@@ -26,7 +26,7 @@ import type { AuthorizationContext, ContextTransport } from "./context.js";
  *
  * - `NO_CONTEXTS` — the subject holds none. Nothing to choose.
  * - `NO_ACCESS_IN_APP` — the context is real and does not open this application.
- * - `UNAVAILABLE` — no answer was obtained about the CONTEXT LIST. **This is not an expired session
+ * - `UNAVAILABLE` — no usable answer was obtained about the CONTEXT LIST. **This is not an expired session
  *   and nothing here suggests re-authenticating.** Sending someone to sign in again because a
  *   decision point was unreachable teaches them that signing in fixes outages, and it does not.
  *
@@ -78,7 +78,12 @@ export type ContextSessionState =
       readonly permissions: AuthorizationState;
     }
   /**
-   * The context list could not be obtained. **No `reason`, on purpose:** the text would come from
+   * The context list could not be obtained, or what arrived was not a list of contexts: not an array,
+   * or an array that arrived with elements and held none that names a context — one whose
+   * `contextId`, read, is a string; or a list in which reading an element, its `contextId` or its
+   * `hasAccess` throws, one holding an element that is a function, or one that gained an element
+   * while it was being read. An empty array is `NO_CONTEXTS`, and an element that names no context is
+   * left out, and nothing else with it. **No `reason`, on purpose:** the text would come from
    * the consumer's own transport, which got it from a server, and this package has no way to know
    * what is safe to carry in someone else's error string — it would be one `render` away from a
    * screen, unbounded and unlabelled.
@@ -141,12 +146,24 @@ export interface ContextSession {
   /**
    * Make a context active.
    *
+   * A context the list names more than once is entered the most restrictive way it is named: if one
+   * of them says it does not open this application, that one is taken.
+   *
    * @throws RangeError if the id is not one of the known contexts. That is a programming error —
    *     the ids come from this session — and the state does not change. **A closed session does not
    *     raise it either: inert means inert.**
    */
   selectContext(contextId: string): Promise<void>;
-  /** Instance-level decisions from the active context's permissions session. */
+  /**
+   * Instance-level decisions from the active context's permissions session.
+   *
+   * With no active session — no context chosen yet, a context without access to the app, or a closed
+   * session — every request resolves with the empty list and is not judged. Otherwise the request goes
+   * to that session's `decide()`, and a request whose identifiers are not strings can be refused there:
+   * with `@ricardoqmd/authz-core`, a `RangeError` naming the field, unless that session is itself in a
+   * state that does not judge it. An answer that arrives after the subject moved to another context is
+   * dropped, and the call resolves with the empty list.
+   */
   decide(request: DecisionRequest): Promise<readonly Decision[]>;
   /**
    * Close the active permissions session, drop the listeners and make this session inert.
@@ -159,7 +176,8 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
   const { app, contextTransport, buildSession } = options;
 
   let state: ContextSessionState = { status: "IDLE" };
-  let contexts: readonly AuthorizationContext[] = [];
+  /** The contexts the last usable list named, each with what was read of it. See {@link contextsOf}. */
+  let contexts: readonly Listed[] = [];
   let activeSession: AuthorizationSession | undefined;
   let unsubscribeFromSession: (() => void) | undefined;
 
@@ -187,29 +205,16 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
    * re-check wherever a test happens to fail repeats the method that already failed. **A new
    * `await` in this file is a new row in the table.**
    *
-   * **The last three columns say which superseders each re-check is TESTED against — not which ones
-   * could reach it, and the difference is the one that hides a gap.** Those were the same list once, on every row, and the suite exercised only
-   * the select; the `start()` and `close()` bumps could both be deleted with the whole suite green
-   * and branch coverage at 100 %. A table that names what could happen and not what is watched is
-   * one no reader can find a gap in, so the gaps are written here instead.
+   * Three events supersede a call in flight — a second `start()`, a `selectContext()` and a
+   * `close()` — and each of them bumps `generation`, so every re-check below answers all three alike.
+   * The rejected path of `start` is its own row: it is a separate re-check.
    *
-   * `yes` = a mutation of that re-check turns a test of that superseder red. `no` = nothing does.
-   * The rejected path of `start` is its own row: it is a separate re-check and it is covered
-   * differently.
-   *
-   * **Read a `yes` as two mutations, not one, or the table says more than it knows.** A cell is `yes`
-   * only when some test goes red BOTH with that row's re-check removed AND with that column's
-   * `generation += 1` removed — the first says which row the witness belongs to, the second says which
-   * superseder it actually pins. A test that supersedes twice goes red under neither bump alone and is
-   * evidence for no cell at all; two cells here carried a `yes` from exactly that defect, and their
-   * tests were split so each pins one trigger.
-   *
-   *   suspension point                       re-check         start  select  close()
-   *   -------------------------------------  ---------------  -----  ------  -------
-   *   start: await listContexts — resolved   before painting    yes    yes     yes
-   *   start: await listContexts — rejected   before painting    yes    yes     no
-   *   activate: await session.start()        before emitting    no     yes     no
-   *   decide: await session.decide(...)      before returning   yes    yes     yes
+   *   suspension point                       re-check
+   *   -------------------------------------  ----------------
+   *   start: await listContexts — resolved   before painting
+   *   start: await listContexts — rejected   before painting
+   *   activate: await session.start()        before emitting
+   *   decide: await session.decide(...)      before returning
    *
    * **The file has five `await`s and this table has four rows, and that is the rule holding rather
    * than a row missing.** The two `await activate(...)` calls are each followed by a `return` — one
@@ -220,40 +225,46 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
    * **Each row is about the re-check named in its second column, and not about the guard inside the
    * `subscribe` callback below.** That one runs on every emission the built session makes; it is
    * not a suspension point and it is not in this table. The two are easy to confuse — they sit
-   * fifteen lines apart and both compare `issuedAt` against `generation` — and they have been
-   * confused before, in a place that claimed to be measuring one while it neutralised the other.
+   * fifteen lines apart and both compare `issuedAt` against `generation`.
    *
-   * **The three `no` cells are known gaps rather than oversights.** They are the shapes nobody has
-   * built a test
-   * for: a rejected listing superseded by a `close()`, and the re-check after `await session.start()`
-   * superseded by a `start()` or a `close()`. The guard is present on every row — what is missing is
-   * a witness, and the row says so rather than implying coverage it does not have. `decide` is the
-   * row that matters most and it is the one fully covered.
+   * **What a consumer sees when a re-check is removed**, pair by pair: each suspension point above
+   * against each of the three events that supersede it. Always a form of the defect the rule exists
+   * to prevent — something from the context the subject left, painted or returned after they left
+   * it — and not always the same form. Measured with the real core. The `decide()` column names the
+   * context an answer belongs to, because that is what tells the label and the answer apart; the last
+   * column is what `selectContext()` then does for a context the server returned, where it was asked:
    *
-   * **And the five combinations below were not gaps of the same size** — which is why two of them
-   * are the two that got witnesses. Each was measured: reproduced with its own re-check removed, using a
-   * probe whose every answer is SIGNED with the context that produced it — so the
-   * label and the answer can be told apart. That signing is the whole reason this paragraph can be
-   * trusted: an earlier version of it claimed all five stayed fail-closed, written from a probe
-   * that could not distinguish the two, and three of the five are not.
+   *   re-check removed x superseded by    state             label  menu   decide()      selectContext
+   *   ----------------------------------  ----------------  -----  -----  ------------  -------------
+   *   listContexts resolved  x start      CHOOSING_CONTEXT  -      -      answer:ctx-c  RangeError
+   *   listContexts resolved  x select     CHOOSING_CONTEXT  -      -      answer:ctx-a  -
+   *   listContexts resolved  x close()    CHOOSING_CONTEXT  -      -      []            -
+   *   listContexts rejected  x start      UNAVAILABLE       -      -      answer:ctx-c  RangeError
+   *   listContexts rejected  x select     UNAVAILABLE       -      -      answer:ctx-a  RangeError
+   *   listContexts rejected  x close()    UNAVAILABLE       -      -      []            -
+   *   await session.start()  x start      IN_CONTEXT        ctx-a  IDLE   answer:ctx-b  -
+   *   await session.start()  x select     IN_CONTEXT        ctx-a  IDLE   answer:ctx-b  -
+   *   await session.start()  x close()    IN_CONTEXT        ctx-a  IDLE   []            -
+   *   await session.decide() x each       no change with the real core — see below
    *
-   * **What holds in all five:** `decide()` never returns a DISCARDED session's answers. The session
-   * it consults is always the live one, because `discardSession()` drops the reference before
-   * anything else. **What does not hold:** it is not empty in three of them, and in one of those the
-   * label and the menu belong to the abandoned context while the answer belongs to the new one.
+   * With every re-check in place the same twelve end on the screen of the call that superseded: in
+   * the context that call chose, with its menu and its answers, or `IDLE` after `close()`.
    *
-   *   combination (re-check removed)         state            label   menu    decide()      selectContext
-   *   -------------------------------------  ---------------  ------  ------  ------------  -------------
-   *   listContexts resolved x start          CHOOSING_CONTEXT   -       -      answer:ctx-c  RangeError
-   *   listContexts rejected x start          UNAVAILABLE        -       -      answer:ctx-c  RangeError
-   *   listContexts rejected x close()        UNAVAILABLE        -       -      []            -
-   *   await session.start() x start          IN_CONTEXT       ctx-a   IDLE     answer:ctx-b  -
-   *   await session.start() x close()        IN_CONTEXT       ctx-a   IDLE     []            -
+   * **The `decide()` row is decided by the session, and that is why the re-check stays.** With the
+   * real core, removing it changes nothing a consumer sees under any of the three: the discarded
+   * session is closed first, and a closed core answers the empty list. With a session of the
+   * consumer's own that still answers after `close()` — `buildSession` is theirs — the call in flight
+   * returns the answers of the context left: under the new context's label after a `start()` or a
+   * `selectContext()`, and after `close()` on a closed screen.
    *
-   *   **The last two rows are measured against the REAL core, not against a double**, and the
-   *   menu column used to say `ctx-a` because of that. Measured, and two things about the abandoned session
-   *   decide the cell, and they are JOINTLY sufficient and individually insufficient — the full 2x2,
-   *   both factors, all four combinations:
+   * **What holds in the other nine:** `decide()` never returns a DISCARDED session's answers. The
+   * session it consults is always the live one, because `discardSession()` drops the reference before
+   * anything else. **What does not hold:** it is not empty in six of them, and in two of those the
+   * label belongs to the abandoned context while the answer belongs to the new one.
+   *
+   *   **The rows of `await session.start()` superseded by a `start()` and by a `close()` are what the
+   *   REAL core produces**, and two things the abandoned session does decide them — JOINTLY
+   *   sufficient and individually insufficient, in all four combinations:
    *
    *     close() sets idle   start() declines to emit    nested state      carries a menu
    *     ------------------  --------------------------  ----------------  --------------
@@ -270,46 +281,35 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
    *   **What the two decide jointly: which menu-less state.** `IDLE` needs both; with only the
    *   re-check the state is whatever the session last published before its await, which is
    *   `LOADING` — a screen that says "still loading" about a context nobody is in. The real core
-   *   does both, which is why the rows above read `IDLE`.
+   *   does both, which is why those rows read `IDLE`. Neither factor can be called irrelevant:
+   *   each changes the cell once the other is switched.
    *
-   *   **Why this note is phrased as a conjunction and not as "X makes no difference":** it said
-   *   the latter until the fourth cell was run, on the strength of three cells varied one at a time
-   *   from a shared baseline. Three cells of a 2x2 cannot separate an inert factor from an
-   *   interacting one, and these two interact. A claim that a factor does not matter needs the cell
-   *   where the other factor is switched, or it is not an isolation.
+   *   - **Three answer under the wrong label, or under none.** The re-check after
+   *     `await session.start()` superseded by a `start()` or by a `selectContext()`: the state's
+   *     context id is the abandoned one, **and `decide()` answers for the new one.** With the real
+   *     core the nested state is `IDLE`, so the screen shows the abandoned context's NAME over no
+   *     permissions at all. It is the trap described above, reached from the mirror image — there the
+   *     answer was stale under a fresh label, here the label is stale over a fresh answer. And a
+   *     resolved listing superseded by a `selectContext()` paints its late list as a picker over the
+   *     context the subject just chose, while `decide()` answers for that context.
+   *   - **Three degrade to a stale screen.** Each re-check on the way into a context, superseded by
+   *     `close()`, repaints or keeps something the subject already left: a picker, `UNAVAILABLE`, or
+   *     the context left over an `IDLE` menu. All three are fail-closed: `decide()` is empty.
+   *   - **Three lock the subject out.** A listing superseded by a second `start()`, resolved or
+   *     rejected, and a rejected listing superseded by a `selectContext()`: the late answer leaves the
+   *     context list either **superseded** (the resolved path keeps the stale list) or **emptied**
+   *     (the rejected path's late `catch` clears it after the call that superseded it succeeded).
+   *     `selectContext()` then raises `RangeError` **for a context the server does return**, and the
+   *     only way out is another `start()`. In all three `decide()` answers from the live session
+   *     while the screen offers no way to reach it: with the resolved path's re-check removed, a
+   *     second start that returns `[ctx-c]` leaves the picker showing `[ctx-a, ctx-b]`, and
+   *     `selectContext("ctx-c")` throws.
    *
-   *   The original error overstated the consequence — there is no stale menu on screen — and the
-   *   half that matters is unchanged: the label and the answer still disagree.
+   * That last trio is the shape `NO_ACCESS_IN_APP` carries a context list to avoid — a screen that
+   * offers the subject no way out — reached from a different direction.
    *
-   *   - **One answers under the wrong label.** The re-check after `await session.start()`
-   *     superseded by a `start()`: the state's context id is the abandoned one, **and `decide()`
-   *     answers for the new one.** With the real core the nested state is `IDLE` — the abandoned
-   *     session was closed and never emitted its menu — so the screen shows the abandoned context's
-   *     NAME over no permissions at all, which is a worse-looking screen and a smaller lie than a
-   *     stale menu would be. It is the trap described thirty lines above, reached from the mirror
-   *     image — there the answer was stale under a fresh label, here the label is stale over a fresh
-   *     answer. Same incoherence, opposite halves.
-   *   - **Two degrade to a stale screen.** A rejected listing superseded by `close()`, and the
-   *     re-check after `await session.start()` superseded by a `close()`, repaint or keep a context
-   *     the subject already left.
-   *     Both are fail-closed: `decide()` is empty.
-   *   - **Two lock the subject out.** The two where a `listContexts` is superseded by a second
-   *     `start()`: the late answer leaves the context list either **superseded** (the resolved
-   *     path — it keeps the stale list) or **emptied** (the rejected path — the late `catch` clears
-   *     it after the new start already succeeded). Either way `selectContext()` then raises
-   *     `RangeError` **for a context the server does return**, and the only way out is another
-   *     `start()`. And in both, `decide()` answers `PERMIT` from the live session while the screen
-   *     offers no way to reach it. Measured: with the resolved-path re-check removed, a second
-   *     start returning `[ctx-c]` leaves the picker showing `[ctx-a, ctx-b]` and
-   *     `selectContext("ctx-c")` throwing.
-   *
-   * That last pair is the shape `NO_ACCESS_IN_APP` carries a context list to avoid — a screen that
-   * offers the subject no way out — reached from a different direction. **They are the two the
-   * `start` column now reads `yes`**: each has a witness that asserts on `selectContext("ctx-c")`
-   * succeeding after the superseded listing settles, so the test fails on the lockout itself and not
-   * on a rejected promise.
-   *
-   * **A new `await` here is a new row, and a row is not finished until its last three columns are.**
+   * **A new `await` here is a new row, and a row is not finished until it says what a consumer sees
+   * when its re-check is missing.**
    *
    * **`close()` on a discarded session is necessary and not sufficient.** It stops that session
    * emitting and makes its `decide()` deny — but **a promise this layer already holds keeps
@@ -376,25 +376,35 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
    * bounded by nothing. The cost is paid on a switch BACK: the menu and every decision are asked
    * again. That is the trade this package takes deliberately.
    */
-  async function activate(context: AuthorizationContext): Promise<void> {
+  async function activate(context: Listed): Promise<void> {
     generation += 1;
     const issuedAt = generation;
 
+    // THE CONTEXT WAS READ ONCE, WHERE THE LIST WAS JUDGED, and every use is what was read then —
+    // never the element read again. The object is the one the list arrived with, and the consumer
+    // holds it too — it is inside the `contexts` of the state it was shown. Read again after
+    // `await session.start()`, or on each emission of the session, a `contextId` changed in between
+    // labelled one context's answers with another context's id: the session asked for `ctx-a`, and the
+    // screen said `ctx-b` over them. Read again here, a `hasAccess` that could be read when the list
+    // was judged could throw out of `start()`, and one that said no could say yes.
+    const contextId = context.contextId;
+    const hasAccess = context.hasAccess;
+
     discardSession();
 
-    if (!context.hasAccess) {
+    if (!hasAccess) {
       // The session is not built at all. Asking and inferring "no access" from an empty answer
       // would confuse "this context does not open this app" with "this context opens it and may do
       // nothing", which are different screens.
       setState({
         status: "NO_ACCESS_IN_APP",
-        contextId: context.contextId,
-        contexts,
+        contextId,
+        contexts: contexts.map((listed) => listed.context),
       });
       return;
     }
 
-    const session = buildSession(context.contextId);
+    const session = buildSession(contextId);
     activeSession = session;
     unsubscribeFromSession = session.subscribe((permissions) => {
       // A late emission from a session this layer has already discarded must not paint. The
@@ -403,7 +413,7 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
       if (issuedAt !== generation || session !== activeSession) {
         return;
       }
-      setState({ status: "IN_CONTEXT", contextId: context.contextId, permissions });
+      setState({ status: "IN_CONTEXT", contextId, permissions });
     });
 
     // THE OPTIMISTIC PAINT. Emitted BEFORE `start()` so the screen carries the new context the
@@ -421,7 +431,7 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
     // first await — and `buildSession` is the consumer's by design, so this cannot be assumed away.
     setState({
       status: "IN_CONTEXT",
-      contextId: context.contextId,
+      contextId,
       permissions: session.getState(),
     });
 
@@ -432,7 +442,7 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
     }
     setState({
       status: "IN_CONTEXT",
-      contextId: context.contextId,
+      contextId,
       permissions: session.getState(),
     });
   }
@@ -446,14 +456,16 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
       if (closed) {
         // Registers nothing, and the returned function is still safe to call.
         //
-        // DEFENCE IN DEPTH FOR A FAIL-CLOSED PROPERTY: the permission state of a closed session
-        // does not reach a listener that subscribes after `close()`. It is redundant IN THE SHIPPED
-        // FLAG POSITION and load-bearing in the other one, which is the whole reason a redundant
-        // guard is kept.
+        // A FAIL-CLOSED PROPERTY: the permission state of a closed session does not reach a listener
+        // that subscribes after `close()`. In the shipped flag position this branch keeps out one
+        // listener a consumer can see: one that subscribes while the final idle state is being
+        // delivered — from inside another listener — lands here, because the flag is already set, and
+        // without the branch it would join the set being walked and receive that `IDLE`. With the flag
+        // moved after the emission it is also the barrier the table below measures.
         //
-        // Measured by watching the thing the guard protects — what a late subscriber RECEIVES —
-        // with a listener that resurrects the session from the final idle state and a second
-        // listener that subscribes after `close()` has returned. Four cells:
+        // What it protects is what a late subscriber RECEIVES, with a listener that resurrects the
+        // session from the final idle state and a second listener that subscribes after `close()`
+        // has returned. Four cells:
         //
         //     branch   flag             the late subscriber receives
         //     -------  ---------------  --------------------------------------------------
@@ -470,15 +482,10 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
         // `getState()` returns the resurrected state in both of those cells, so with the flag moved a
         // late reader sees it whatever this branch does. Only the flag's position keeps that closed.
         //
-        // WHY THIS IS PROSE AND NOT A MUTATION ROW. This package's suite cannot tell the last two
-        // cells apart: no test here watches a late subscriber on a resurrected session, so with the
-        // flag moved the same two tests go red, at the same assertions, with or without the branch.
-        // The core has such a witness for its own copy of this pair, and even there a comparison of
-        // red test names sees nothing: it is red in both cells, at its state assertion with the branch
-        // and at its late-subscriber assertion without it. Comparing sets of red test names cannot see
-        // a factor that no test observes, nor one whose effect lands on an assertion that another
-        // assertion of the same test already makes fail. A previous note here claimed redundancy in
-        // both flag positions on exactly that evidence, and it was false.
+        // So with the flag where it is, removing this branch changes what a listener subscribing during
+        // the final emission receives, and nothing for one that subscribes after `close()` returned;
+        // with the flag moved after the emission, it is also the difference between that late
+        // subscriber hearing nothing and hearing a closed session come back.
         //
         // It also buys a bound, and that is real too: a consumer that keeps subscribing to a session
         // it forgot to drop would otherwise accumulate one entry per call, forever.
@@ -527,20 +534,30 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
       if (issuedAt !== generation) {
         return;
       }
-      contexts = available;
+      // AN ANSWER THAT IS NOT A LIST OF CONTEXTS IS NOT A LIST. `null` used to throw out of `start()`
+      // and leave the state at `LOADING_CONTEXTS` for good, and so did a list holding a `null`; a
+      // string was offered as a picker with one context per character. It is `UNAVAILABLE`, and the
+      // list is cleared for the reason the failed path above clears it.
+      const listed = contextsOf(available);
+      if (listed === undefined) {
+        contexts = [];
+        setState({ status: "UNAVAILABLE" });
+        return;
+      }
+      contexts = listed;
 
-      if (available.length === 0) {
+      if (listed.length === 0) {
         setState({ status: "NO_CONTEXTS" });
         return;
       }
-      const only = available[0];
-      if (available.length === 1 && only !== undefined) {
+      const only = listed[0];
+      if (listed.length === 1 && only !== undefined) {
         // One context is not a choice. Showing a picker with a single option asks the subject to
         // confirm something that has no alternative.
         await activate(only);
         return;
       }
-      setState({ status: "CHOOSING_CONTEXT", contexts: available });
+      setState({ status: "CHOOSING_CONTEXT", contexts: listed.map((l) => l.context) });
     },
 
     async selectContext(contextId) {
@@ -549,7 +566,19 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
         // `start()`.
         return;
       }
-      const context = contexts.find((c) => c.contextId === contextId);
+      // A CONTEXT LISTED MORE THAN ONCE IS ENTERED THE MOST RESTRICTIVE WAY IT IS LISTED: one that
+      // says it does not open this application is taken over one that says it does, as a menu action
+      // listed twice collapses to the most restrictive. Taking the first would leave out the one that
+      // says no.
+      let context: Listed | undefined;
+      for (const listed of contexts) {
+        if (listed.contextId !== contextId) {
+          continue;
+        }
+        if (context === undefined || (context.hasAccess && !listed.hasAccess)) {
+          context = listed;
+        }
+      }
       if (context === undefined) {
         throw new RangeError(`unknown contextId: ${contextId}`);
       }
@@ -597,4 +626,68 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
       listeners.clear();
     },
   };
+}
+
+/**
+ * A context a list kept: the element as it arrived, which is what a state shows, and the two fields
+ * this package uses, as they were read when the list was judged.
+ */
+interface Listed {
+  readonly context: AuthorizationContext;
+  readonly contextId: string;
+  readonly hasAccess: unknown;
+}
+
+/**
+ * The contexts a list names, read once by index — its length is asked once more afterwards, only to
+ * tell whether it grew — or `undefined` when it is not an array, when it
+ * arrived with elements and names none, when reading it throws — the list at a position, or an
+ * element's `contextId` or `hasAccess` — when an element is a function, or when the list gained a
+ * position while it was being read.
+ *
+ * An element names a context when its `contextId`, read, is a string — an object's, and a string's
+ * or a number's too, read through the prototype its kind shares. One that names none — `null`,
+ * `undefined`, or one whose `contextId`, read, is not a string — is left out, and nothing else with
+ * it. An element that cannot be read is not left out: it is not known to name no context, and
+ * leaving it out could leave one other context to be entered with no choice.
+ * The elements kept are the ones that arrived, not copies; their `contextId` and `hasAccess` are read
+ * here, once each, and nothing reads them from the element again.
+ */
+function contextsOf(value: unknown): readonly Listed[] | undefined {
+  try {
+    if (!Array.isArray(value)) {
+      return undefined;
+    }
+    const length = value.length;
+    const kept: Listed[] = [];
+    for (let i = 0; i < length; i += 1) {
+      const element: unknown = value[i];
+      // A function can carry every field a context declares, and it is not data: not known to name
+      // no context, so the list is not used, as when an element cannot be read.
+      if (typeof element === "function") {
+        return undefined;
+      }
+      // `null` and `undefined` hold nothing. Every other element is read — a string or a number too,
+      // through the prototype its kind shares — so what is left out is what its read did not name.
+      if (element === null || element === undefined) {
+        continue;
+      }
+      const contextId = (element as { contextId?: unknown }).contextId;
+      if (typeof contextId !== "string") {
+        continue;
+      }
+      // Read here, with the id, so that an element whose `hasAccess` cannot be read makes the list
+      // unusable, as one whose `contextId` cannot be read does, and so that what is entered later is
+      // what was read now.
+      const hasAccess = (element as { hasAccess?: unknown }).hasAccess;
+      kept.push({ context: element as AuthorizationContext, contextId, hasAccess });
+    }
+    // A position the list gained while it was being read was never read. Same rule.
+    if (!(value.length <= length)) {
+      return undefined;
+    }
+    return length > 0 && kept.length === 0 ? undefined : kept;
+  } catch {
+    return undefined;
+  }
 }

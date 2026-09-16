@@ -203,12 +203,10 @@ describe("the real core through the factory", () => {
 
   /*
    * THE OTHER HALF. Every case above is fail-closed: each one asserts that something does NOT reach
-   * the consumer, so an implementation that never answered would satisfy all of them. That was
-   * measured, in the past tense on purpose: BEFORE this case existed, a `decide()` returning the
-   * empty list forever left all four of them green, and emptying the CORE's `decide()` left this
-   * package's entire suite of 46 green. **This case is what changed that.** With it, the same
-   * mutation of the core exits 1 here and this is the only case that catches it — so the sentence
-   * above describes the tree this file replaced, not the tree it ships in.
+   * the consumer, so an implementation that never answered would satisfy all of them — and so would
+   * a core whose `decide()` returned the empty list forever. **This case asserts that an answer DOES
+   * arrive**, through the real core, and it is the one case in this package that a core which never
+   * answers would fail.
    *
    * Both effects are asserted, not just the PERMIT: an implementation that answered PERMIT to
    * everything would pass a PERMIT-only assertion.

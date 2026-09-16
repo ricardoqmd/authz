@@ -95,7 +95,7 @@ transforms, so that segment now survives them too. See
 | `contextId` | Optional. The authorization context to send and require an echo of. See the three modes above. |
 | `contextHeader` | Required only when `contextId` is given. **Configuration, never a constant** — this package does not know what your deployment calls its authorization context. |
 | `getToken` | Sync or async. Returning `null` omits the `Authorization` header **entirely**; an empty one is a different statement to a backend, and not the one we mean. |
-| `fetch` | Optional; defaults to the global. Injectable so you can wrap it — retries, tracing, your own tests — without this package having an opinion about any of it. |
+| `fetch` | Optional; defaults to the global. Injectable so you can wrap it — retries, tracing, your own tests — without this package having an opinion about any of it. This package asks each request once. On a connection that drops requests, a `fetch` that asks a failed one once more is what keeps a large screen from being asked again, and shown partly `DENY`, draw after draw: the core README has what it costs without one. |
 | `classifyError` | Optional. See below. |
 | `paths` | Optional, both entries optional. Where the two routes live. Defaults to the paths in the table above. See below. |
 

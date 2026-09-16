@@ -288,7 +288,16 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
       out.Authorization = `Bearer ${token}`;
     }
     if (contextId !== undefined && contextHeader !== undefined) {
-      out[contextHeader] = contextId;
+      // DEFINED, not assigned: the name is the consumer's, and assigned, a header named `__proto__`
+      // set the prototype of this object instead of adding a header, and was never sent. Defined, it
+      // is a field of the headers handed to `fetch`; whether `fetch` sends it is the platform's, and
+      // Node 20's drops a `__proto__` key from a headers object.
+      Object.defineProperty(out, contextHeader, {
+        value: contextId,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
     }
     return out;
   }
@@ -404,9 +413,9 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
  * `/me/permissions` **with the `Authorization` header**, because a container strips `;parameters`
  * from a segment before normalising it — the same damage that motivated refusing `/`, through a
  * character nobody had listed. A whitelist has no such default. What it costs is that an id outside
- * the set is refused whether or not it would have been harmful, and the price was measured: over a
- * 75-id battery, **33 ids stopped being sent, 0 started being sent, and no URL of an accepted id
- * changed** — the rule only ever closes.
+ * the set is refused whether or not it would have been harmful, and that price is known: compared id
+ * by id with the rule it replaced, over 75 ids, **33 that used to be sent are refused, none that used
+ * to be refused is sent, and no accepted id's URL changed** — the rule only ever closes.
  *
  * Case passes both ways, and that is deliberate: see the note on case in `segment`.
  */
@@ -458,10 +467,10 @@ const unreserved = /^[A-Za-z0-9._~-]+$/;
  * an identifier escapes its segment and reaches a route nobody meant to call. **Since the rule
  * admits only unreserved characters, no accepted id reaches this call with anything to encode** —
  * it alters 0 of the 66 characters the rule admits. It stays because a whitelist and an encoder
- * fail differently, and its witness is the test asserting that the encoder is the IDENTITY for every
- * accepted id: that test kills `escape` (which sends `a%7Eb` for `a~b`), and it is honest about
- * what it cannot kill — replacing `encodeURIComponent` with `encodeURI` or with nothing at all is an
- * EQUIVALENT MUTANT over the accepted set, indistinguishable by any test, and stays green.
+ * fail differently. What it does today is be the IDENTITY for every accepted id — an encoder that
+ * was not, such as `escape`, would send `a%7Eb` for `a~b` and change a URL — and that is all a
+ * consumer can see of it: over the accepted set `encodeURIComponent`, `encodeURI` and no encoding at
+ * all produce the same URL. It starts to matter the day the rule admits a character it would encode.
  *
  * <h3>Case, which passes both ways, and where that bites</h3>
  *
@@ -494,8 +503,8 @@ function segment(value: string): string {
   // this package's own `fetch` call: `[".."]` passed the pattern as ".." and failed `=== ".."`, the
   // encoder turned it back into "..", and the URL parser sent the request one route up, to
   // `/me/permissions`, with the `Authorization` header; `undefined` and `null` were sent as the ids
-  // "undefined" and "null". It is also what makes the encoder's equivalent mutants equivalent: with
-  // it, nothing but a string of unreserved characters reaches `encodeURIComponent`.
+  // "undefined" and "null". It is also why the choice of encoder below makes no difference today:
+  // with it, nothing but a string of unreserved characters reaches `encodeURIComponent`.
   if (typeof value !== "string") {
     throw new RangeError(
       `the application id must be a string of unreserved characters, received ${
