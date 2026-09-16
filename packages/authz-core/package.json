@@ -1,6 +1,6 @@
 {
   "name": "@ricardoqmd/authz-core",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Framework-agnostic authorization primitives: permission menus, batched decisions and a fail-closed session that holds them",
   "keywords": [
     "authorization",
@@ -30,7 +30,11 @@
       "require": "./dist/index.cjs"
     }
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "sideEffects": false,
   "publishConfig": {
     "access": "public"

@@ -1,6 +1,6 @@
 {
   "name": "@ricardoqmd/authz-context",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "The authorization context a subject works under: listing, choosing, and one permissions session per context",
   "keywords": [
     "authorization",
@@ -30,7 +30,11 @@
       "require": "./dist/index.cjs"
     }
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "sideEffects": false,
   "publishConfig": {
     "access": "public"
