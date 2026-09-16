@@ -590,10 +590,9 @@ describe("selectContext with an unknown id", () => {
 /* 6 — the other two superseders: start() and close() ---------------------- */
 
 /*
- * The suspension table in `session.ts` names THREE superseders on every row — a later start, a
- * select, and close() — and until now the suite exercised only the select. Both missing bumps were
- * measured: removing either left the whole suite green, and branch coverage was 100% while they
- * survived. Coverage sees a line run; it does not see WHICH answer the line let through.
+ * Three events supersede a call in flight, as `session.ts` says above its suspension table — a later
+ * start, a select, and close() — and each of them bumps the generation. The blocks below are about the
+ * two that are not a select: what a call already in flight gives the caller once one of them lands.
  */
 
 /** A session double whose decide() resolves only when the test releases it. */
@@ -995,5 +994,361 @@ describe("the optimistic paint", () => {
 
     sessions.get("ctx-b")!.finish();
     await selectingB;
+  });
+});
+
+/* — the context is read once, when it is activated ------------------------------- */
+
+/*
+ * The contexts a subject is shown are the objects the list arrived with, and the consumer holds them.
+ * Changing one while its session starts must not change which context the screen says it is in: the
+ * session was built for the context that was chosen, and every state painted for it carries that id —
+ * the ones painted before the session settles, the ones its emissions paint, and the one after.
+ */
+describe("the context is read once, when it is activated", () => {
+  it("a context id changed while its session starts does not relabel that session's states", async () => {
+    const gate = deferred<void>();
+    const { session, built } = build([context("ctx-a"), context("ctx-b")], (id) => {
+      const made = fakeSession(id, {
+        start: async () => {
+          made.emit({ status: "LOADING" });
+          await gate.promise;
+          made.emit({ status: "READY", permissions: [{ action: "read", effect: "PERMIT" }] });
+        },
+      });
+      return made.session;
+    });
+    const labels: string[] = [];
+    session.subscribe((s) => {
+      if (s.status === "IN_CONTEXT") {
+        labels.push(`${s.contextId}/${s.permissions.status}`);
+      }
+    });
+    await session.start();
+    const shown = session.getState();
+    const listed = shown.status === "CHOOSING_CONTEXT" ? shown.contexts : [];
+
+    const selecting = session.selectContext("ctx-a");
+    (listed[0] as { contextId: string }).contextId = "ctx-b";
+    gate.resolve();
+    await selecting;
+
+    expect([built, labels]).toEqual([
+      ["ctx-a"],
+      ["ctx-a/IDLE", "ctx-a/LOADING", "ctx-a/READY", "ctx-a/READY"],
+    ]);
+  });
+});
+
+/* — a context list that is not a list of contexts ---------------------------------------------- */
+
+describe("a context list that is not a list of contexts", () => {
+  async function started(list: unknown): Promise<{ started: string; state: unknown; built: string[] }> {
+    const { session, built } = build(list as readonly AuthorizationContext[]);
+    const settled = await session.start().then(
+      () => "resolved",
+      (error: unknown) => `rejected ${String(error)}`,
+    );
+    return { started: settled, state: session.getState(), built };
+  }
+
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["a string", "ctx-a"],
+    ["an object", { contexts: [context("ctx-a")] }],
+    ["a list holding only a null", [null]],
+    ["a list holding only an object with no contextId", [{}]],
+  ])("%s leaves the session UNAVAILABLE, not loading forever and not offering a picker", async (_name, list) => {
+    expect(await started(list)).toEqual({ started: "resolved", state: { status: "UNAVAILABLE" }, built: [] });
+  });
+
+  it("an element that names no context is left out, and the context beside it is activated", async () => {
+    const { started: s, state, built } = await started([null, context("ctx-b")]);
+
+    expect([s, state, built]).toMatchObject(["resolved", { status: "IN_CONTEXT", contextId: "ctx-b" }, ["ctx-b"]]);
+  });
+
+  it("an empty list is still NO_CONTEXTS", async () => {
+    expect(await started([])).toEqual({ started: "resolved", state: { status: "NO_CONTEXTS" }, built: [] });
+  });
+
+  it("after an unusable list, selecting a context the previous list offered is refused", async () => {
+    let answer: unknown = [context("ctx-a"), context("ctx-b")];
+    const session = createContextSession({
+      app: APP,
+      contextTransport: { listContexts: async () => answer as readonly AuthorizationContext[] },
+      buildSession: (id) => fakeSession(id).session,
+    });
+    await session.start();
+    answer = null;
+    await session.start().catch(() => undefined);
+
+    const selected = await session.selectContext("ctx-a").then(
+      () => "resolved",
+      (error: unknown) => String(error),
+    );
+
+    expect([session.getState(), selected]).toEqual([{ status: "UNAVAILABLE" }, "RangeError: unknown contextId: ctx-a"]);
+  });
+});
+
+/* — the screen belongs to the call that superseded the one in flight ---------------------------- */
+
+/*
+ * Three of the twelve pairs in the suspension table of `session.ts` — a suspension point and the
+ * event that supersedes it — each pinned by what a consumer sees once the late answer arrives.
+ */
+describe("a superseded listing or activation leaves the screen of the call that superseded it", () => {
+  it("a listing that rejects after close() leaves the session IDLE, not UNAVAILABLE", async () => {
+    const parked = deferred<readonly AuthorizationContext[]>();
+    const session = createContextSession({
+      app: APP,
+      contextTransport: { listContexts: () => parked.promise },
+      buildSession: (id) => fakeSession(id).session,
+    });
+
+    const starting = session.start();
+    session.close();
+    parked.reject(new Error("the decision point is down"));
+    await starting;
+
+    expect(session.getState()).toEqual({ status: "IDLE" });
+  });
+
+  it("a re-start() that lands while a context loads its menu shows the context the re-start chose", async () => {
+    const parked = deferred<void>();
+    const listings: (readonly AuthorizationContext[])[] = [[context("ctx-a")], [context("ctx-b")]];
+    const session = createContextSession({
+      app: APP,
+      contextTransport: { listContexts: async () => listings.shift() ?? [] },
+      buildSession: (id) => fakeSession(id, { start: id === "ctx-a" ? async () => parked.promise : undefined }).session,
+    });
+
+    const first = session.start();
+    await settle();
+    await session.start();
+    parked.resolve();
+    await first;
+
+    expect(session.getState()).toMatchObject({ status: "IN_CONTEXT", contextId: "ctx-b" });
+  });
+
+  it("close() while a context loads its menu leaves the session IDLE, not in the context it left", async () => {
+    const parked = deferred<void>();
+    const session = createContextSession({
+      app: APP,
+      contextTransport: { listContexts: async () => [context("ctx-a")] },
+      buildSession: (id) => fakeSession(id, { start: async () => parked.promise }).session,
+    });
+
+    const first = session.start();
+    await settle();
+    session.close();
+    parked.resolve();
+    await first;
+
+    expect(session.getState()).toEqual({ status: "IDLE" });
+  });
+});
+
+describe("a context list that throws while it is read", () => {
+  it("leaves the session UNAVAILABLE, not loading forever", async () => {
+    const list = new Proxy([context("ctx-a")], {
+      get(target, key, receiver) {
+        if (key === "0") {
+          throw new Error("not loaded");
+        }
+        return Reflect.get(target, key, receiver) as unknown;
+      },
+    });
+    const { session } = build(list);
+
+    const started = await session.start().then(
+      () => "resolved",
+      (error: unknown) => String(error),
+    );
+
+    expect([started, session.getState()]).toEqual(["resolved", { status: "UNAVAILABLE" }]);
+  });
+});
+
+describe("a listener that subscribes during the final emission of close()", () => {
+  it("receives nothing: the session is already closed when it subscribes", async () => {
+    const { session } = build([context("ctx-a")]);
+    await session.start();
+    const heardByLate: string[] = [];
+    session.subscribe((state) => {
+      if (state.status === "IDLE") {
+        session.subscribe((later) => heardByLate.push(later.status));
+      }
+    });
+
+    session.close();
+
+    expect(heardByLate).toEqual([]);
+  });
+});
+
+describe("a context list holding an element that cannot be read", () => {
+  const throwing = (field: string) =>
+    Object.defineProperty({ ...context("ctx-x") }, field, {
+      get() {
+        throw new Error("not loaded");
+      },
+      enumerable: true,
+    });
+
+  it.each(["contextId", "hasAccess"])(
+    "an element whose %s throws when read leaves the session UNAVAILABLE, not in the context beside it",
+    async (field) => {
+      const { session, built } = build([context("ctx-a"), throwing(field) as AuthorizationContext]);
+
+      const started = await session.start().then(
+        () => "resolved",
+        (error: unknown) => String(error),
+      );
+
+      expect([started, session.getState().status, built]).toEqual(["resolved", "UNAVAILABLE", []]);
+    },
+  );
+
+  it("an element that is a function carrying a context leaves the session UNAVAILABLE, not in the context beside it", async () => {
+    const carried = Object.assign(function element() {}, context("ctx-x"));
+    const { session, built } = build([context("ctx-a"), carried as unknown as AuthorizationContext]);
+
+    await session.start();
+
+    expect([session.getState().status, built]).toEqual(["UNAVAILABLE", []]);
+  });
+
+  it("a list that gains a context while it is read leaves the session UNAVAILABLE, not in the one it was read with", async () => {
+    const list: AuthorizationContext[] = [context("ctx-a")];
+    Object.defineProperty(list, 0, {
+      get() {
+        list.push(context("ctx-b"));
+        return context("ctx-a");
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    const { session, built } = build(list);
+
+    await session.start();
+
+    expect([session.getState().status, built]).toEqual(["UNAVAILABLE", []]);
+  });
+
+  it("a single element whose hasAccess throws leaves the session UNAVAILABLE, not loading forever", async () => {
+    const { session } = build([throwing("hasAccess") as AuthorizationContext]);
+
+    const started = await session.start().then(
+      () => "resolved",
+      (error: unknown) => String(error),
+    );
+
+    expect([started, session.getState()]).toEqual(["resolved", { status: "UNAVAILABLE" }]);
+  });
+});
+
+describe("a context listed more than once", () => {
+  it.each([
+    ["with access first", [context("ctx-a", true), context("ctx-a", false), context("ctx-b")]],
+    ["without access first", [context("ctx-a", false), context("ctx-a", true), context("ctx-b")]],
+  ])("is entered the way that says it does not open the application (%s)", async (_order, list) => {
+    const { session, built } = build(list);
+    await session.start();
+
+    await session.selectContext("ctx-a");
+
+    expect([session.getState().status, built]).toEqual(["NO_ACCESS_IN_APP", []]);
+  });
+
+  it("listed twice with access, is entered", async () => {
+    const { session, built } = build([context("ctx-a"), context("ctx-a"), context("ctx-b")]);
+    await session.start();
+
+    await session.selectContext("ctx-a");
+
+    expect([session.getState().status, built]).toEqual(["IN_CONTEXT", ["ctx-a"]]);
+  });
+});
+
+/*
+ * The elements a context list keeps are the ones that arrived, so a field of one can answer
+ * differently each time it is read. Each element below answers one way the first time its field is
+ * read and another way after that.
+ */
+describe("a context is entered as it read when the list was judged", () => {
+  function answeringOnceThen(field: "contextId" | "hasAccess", first: unknown, then: unknown | Error): AuthorizationContext {
+    let reads = 0;
+    return Object.defineProperty({ ...context("ctx-a") }, field, {
+      get() {
+        reads += 1;
+        if (reads === 1) {
+          return first;
+        }
+        if (then instanceof Error) {
+          throw then;
+        }
+        return then;
+      },
+      enumerable: true,
+    });
+  }
+
+  it.each([
+    ["a hasAccess that said no, then yes", answeringOnceThen("hasAccess", false, true), ["NO_ACCESS_IN_APP", "ctx-a", []]],
+    ["a hasAccess that said yes, then throws", answeringOnceThen("hasAccess", true, new Error("second read")), ["IN_CONTEXT", "ctx-a", ["ctx-a"]]],
+    ["a contextId that read ctx-a, then throws", answeringOnceThen("contextId", "ctx-a", new Error("second read")), ["IN_CONTEXT", "ctx-a", ["ctx-a"]]],
+    ["a contextId that read ctx-a, then 42", answeringOnceThen("contextId", "ctx-a", 42), ["IN_CONTEXT", "ctx-a", ["ctx-a"]]],
+  ] as const)("%s", async (_n, element, expected) => {
+    const { session, built } = build([element]);
+
+    const started = await session.start().then(
+      () => "resolved",
+      (error: unknown) => String(error),
+    );
+    const state = session.getState();
+
+    expect([started, state.status, "contextId" in state ? state.contextId : undefined, built]).toEqual(["resolved", ...expected]);
+  });
+});
+
+/* — a value that is not an object is read the way an object is ------------------------------------- */
+
+/*
+ * An ordinary read of a field of a boolean goes through the prototype every boolean shares. This
+ * gives it a context's fields for the duration of one listing, and takes them away before anything
+ * is asserted.
+ */
+describe("a context list element that is not an object is read the way an object is", () => {
+  async function withBooleanFields<T>(fields: Record<string, unknown>, run: () => Promise<T>): Promise<T> {
+    for (const [key, value] of Object.entries(fields)) {
+      Object.defineProperty(Boolean.prototype, key, { value, writable: true, configurable: true });
+    }
+    try {
+      return await run();
+    } finally {
+      for (const key of Object.keys(fields)) {
+        delete (Boolean.prototype as unknown as Record<string, unknown>)[key];
+      }
+    }
+  }
+
+  it("a boolean whose read names a context is counted: the context beside it is not entered without a choice", async () => {
+    const { session, built } = build([context("ctx-a"), true as unknown as AuthorizationContext]);
+
+    await withBooleanFields({ contextId: "ctx-b", label: "ctx-b", hasAccess: true }, () => session.start());
+
+    expect([session.getState().status, built]).toEqual(["CHOOSING_CONTEXT", []]);
+  });
+
+  it("a boolean whose read names no context is left out, and the context beside it is activated", async () => {
+    const { session, built } = build([context("ctx-a"), true as unknown as AuthorizationContext]);
+
+    await session.start();
+
+    expect([session.getState().status, built]).toEqual(["IN_CONTEXT", ["ctx-a"]]);
   });
 });

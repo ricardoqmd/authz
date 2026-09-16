@@ -38,6 +38,12 @@ export interface DecisionSet {
    * with.** An answer whose `app` does not match is discarded — silently and fail-closed.
    */
   readonly app: string;
+  /**
+   * An array. An answer whose `decisions` is present — not `null`, not `undefined` — and is not an
+   * array leaves every pair of the call `DENY`, the pairs the other chunks of the call answered too.
+   * One with `null` there, or with no `decisions` at all, holds no element, and leaves absent only the
+   * pairs of its own request.
+   */
   readonly decisions: readonly Decision[];
 }
 
@@ -85,6 +91,24 @@ export interface AuthorizationTransport {
    *
    * The chunking is done by this library — see `splitDecisionRequest`. An implementation
    * receives requests already within the cap it declared and does not need to split again.
+   *
+   * **Each answer carries the pairs its own request asked for.** A pair is answered only by the
+   * answer to a request that asked for it; what another call's answer says about that pair can make
+   * it more restrictive, and cannot answer it. So an implementation that groups concurrent calls
+   * into one has to hand each call the decisions for the pairs in the `request` that call was given:
+   * delivering the combined answer to one call and an empty one to the rest leaves the pairs of the
+   * rest absent, and absent is `DENY`.
+   *
+   * **An answer whose `decisions` is present — not `null`, not `undefined` — and is not an array
+   * leaves every pair of the call `DENY`** — the pairs the other chunks of the call answered too. A
+   * page of results (`{ items, next }`), a map serialised as an object, `{}`, a string, a number, a
+   * boolean, a `Set`: none of them is read as a list, and none is taken for an empty one; the package
+   * does not look inside a value that is not an array. It happens silently and on every call: the call
+   * resolves, nothing rejects, the session stays `READY`, and since nothing of that call is cached the
+   * next one asks again and gets the same. Return what your server sent, parsed, only once you have
+   * checked that its `decisions` is an array, and reject otherwise: a rejection leaves absent only the
+   * pairs of the request it answers. An answer with no `decisions` at all, or `null` there, holds no
+   * element, and it too leaves absent only the pairs of its own request.
    */
   fetchDecisions(app: string, request: DecisionRequest): Promise<DecisionSet>;
 }

@@ -36,4 +36,16 @@ suspension inventory is a table in the source.
 `NO_ACCESS_IN_APP` carries the context list, so that screen offers a way out instead of stranding the
 subject on it.
 
+A context list that is not a list of contexts is `UNAVAILABLE`, like one that could not be fetched: an
+answer that is not an array, or an array that arrived with elements and names no context. An element
+names a context when its `contextId`, read, is a string; one that names none — `null`, `undefined`, or
+one whose `contextId` is not a string — is left out, and nothing else with it, and an empty list is
+still `NO_CONTEXTS`. A list holding an element whose
+reading throws — the element itself, its `contextId` or its `hasAccess` — is `UNAVAILABLE`: that element
+is not known to name no context. So is a list holding an element that is a function, or one that gains
+an element while it is read. Each element's `contextId` and `hasAccess` are read once, when the list is
+judged, and a context is entered as they read then. A context the list names more than once is entered
+the most restrictive way it is named: if one of them says it does not open the application, that one is
+taken.
+
 The persistence port and the cross-tab signal are not here yet; they arrive separately.

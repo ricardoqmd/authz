@@ -103,6 +103,19 @@ describe("the context pair is optional, and there are exactly three modes", () =
     expect(headersOf(s.calls[0]!.init)[HEADER]).toBeUndefined();
   });
 
+  it.each(["__proto__", "constructor", "toString"])(
+    "BOTH: a header named %s reaches fetch as a field of its own, carrying the id",
+    async (name) => {
+      const s = stub(() => json({ ...MENU, contextId: CTX }));
+      const t = withContext({ fetch: s.fetchDouble, contextHeader: name });
+
+      await t.fetchPermissions(APP);
+
+      const field = Object.getOwnPropertyDescriptor(headersOf(s.calls[0]!.init), name);
+      expect(field?.value).toBe(CTX);
+    },
+  );
+
   it("ONE WITHOUT THE OTHER: an id with nowhere to send it is a RangeError at construction", () => {
     expect(() => transport({ contextId: CTX })).toThrow(RangeError);
     expect(() => transport({ contextId: CTX })).toThrow(/contextHeader is required/);
@@ -207,7 +220,7 @@ describe("the app echo stays here, and is required in every mode", () => {
   });
 
   // The same pair on the decisions route. Both routes read `app` out of the body, and both need
-  // their own witness: the checks are two separate call sites, and a test that exercises one says
+  // their own test: the checks are two separate call sites, and a test that exercises one says
   // nothing about the other.
   //
   // This is the route where getting it wrong is worst. The core discards a whole response whose
@@ -227,7 +240,7 @@ describe("the app echo stays here, and is required in every mode", () => {
     await expect(t.fetchPermissions(APP)).rejects.toThrow(/is not an object/);
   });
 
-  // The two remaining sub-clauses of the same check, each with its own witness. Both fail closed
+  // The two remaining sub-clauses of the same check, each with its own test. Both fail closed
   // on their own — what a missing clause costs is the diagnosis, not the denial — and a rejection
   // that names the wrong defect sends the reader to the wrong file.
 
@@ -370,9 +383,8 @@ describe("an app id occupies exactly one segment", () => {
 describe("the base URL is joined the same way with or without a trailing slash", () => {
   it("a trailing slash is fine, which is what the type declaration and the README both promise", async () => {
     // The promise is published twice — in the `baseUrl` doc comment, which travels in the `.d.ts`,
-    // and in the README npm renders — and until now nothing measured it: removing the
-    // normalisation left the whole suite green. It fails closed (a doubled slash is a 404, so
-    // UNAVAILABLE), which is why this is a promise without a witness rather than an open guard.
+    // and in the README npm renders — so it is asserted here. It fails closed (a doubled slash is a
+    // 404, so UNAVAILABLE), which makes it a promise about the URL rather than a guard.
     const withSlash = stub(() => json({ app: APP, permissions: [] }));
     const withoutSlash = stub(() => json({ app: APP, permissions: [] }));
 
@@ -552,16 +564,14 @@ describe("the routes are configuration, with today's values as defaults", () => 
   });
 
   /*
-   * BOTH SIDES ARE CALLED, and that is not decoration. Until this test called `fetchDecisions` too,
-   * a configured `decisions` path could be ignored outright — the whole entry discarded in favour of
-   * the default — and all 51 tests stayed green. The name promised two and the body exercised one,
-   * which is how half a feature ships with no witness.
+   * BOTH SIDES ARE CALLED, and that is not decoration. The name promises that both configured paths
+   * are used, and a test that called only `fetchPermissions` would not notice a configured
+   * `decisions` path being ignored outright — the whole entry discarded in favour of the default.
    *
    * The stub answers ONE body that satisfies both shapes — `app`, `permissions` AND `decisions` —
-   * on purpose. Answering by route makes this test red for the wrong reason: the transport rejects
-   * the body before the URLs are ever compared, and a witness that fails on a body shape is not a
-   * witness for a route. With this body nothing can fail except the assertion that names the
-   * behaviour.
+   * on purpose. Answering by route would make the transport reject the body before the URLs are ever
+   * compared, and this test would then fail on a body shape instead of on a route. With this body
+   * nothing can fail except the assertion that names the behaviour.
    */
   it("both paths can be supplied, and BOTH are used", async () => {
     const s = stub(() => json({ app: APP, permissions: [], decisions: [] }));
@@ -770,7 +780,9 @@ describe("an application id outside the unreserved set is refused", () => {
     ["%2e%2e", "a percent sign is outside the set, and in a URL %2e%2e is a dot segment"],
     ["%2f", "a percent sign is outside the set, and nginx with a URI part decodes %2F"],
     ["a%b", "an incomplete escape"],
-    ["ñ", "outside ASCII, and unreserved is an ASCII set"],
+    // LATIN SMALL LETTER N WITH TILDE, spelled as its escape: at runtime it is the same
+    // one-character string, and the character itself never has to appear in the source.
+    ["\u00f1", "outside ASCII, and unreserved is an ASCII set"],
     ["a+b", "a sub-delim, and + is a space in a query"],
   ] as const;
 
@@ -852,11 +864,11 @@ describe("an application id outside the unreserved set is refused", () => {
    * output equals input, for every accepted id. It is worth asserting because it is not vacuous —
    * `escape`, one of the plausible wrong encoders, turns "~" into "%7E" and this catches it.
    *
-   * What no test can claim any more: that the encoder is `encodeURIComponent` rather than
-   * `encodeURI`, or rather than nothing at all. Measured over the whole unreserved alphabet, the
-   * three produce identical output, so those mutants are EQUIVALENT and not covered. The encoder
-   * stays as defence in depth for the day someone widens the rule — and this comment is here so that
-   * whoever widens it knows the encoder has no witness beyond identity.
+   * What cannot be asserted: that the encoder is `encodeURIComponent` rather than `encodeURI`, or
+   * rather than nothing at all. Over the whole unreserved alphabet the three produce identical
+   * output, so no id that is sent can tell them apart. The encoder stays as defence in depth for the
+   * day someone widens the rule — and this comment is here so that whoever widens it knows that
+   * identity is all anything here holds it to.
    */
   it("for every accepted id the encoder is the identity", async () => {
     const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
@@ -902,7 +914,7 @@ describe("an application id outside the unreserved set is refused", () => {
    *
    * The last entry is the one that could tell `encodeURIComponent` from `encodeURI` or from no
    * encoder at all, by answering the pattern with one string and the encoder with another. Refusing
-   * it is what makes those mutants equivalent rather than merely untested.
+   * it is why the choice of encoder makes no difference for any id that is sent.
    */
   const unstable = (): string => {
     let reads = 0;
@@ -996,10 +1008,9 @@ describe("the decisions request declares its content type", () => {
 
     const sent = headersOf(s.calls[0]!.init);
     expect(sent).toStrictEqual({ Accept: "application/json", Authorization: "Bearer tok-123" });
-    // Redundant with the strict assertion above, and kept as a statement rather than as a witness:
-    // `toStrictEqual` already fails on any extra key, and measured, removing this line changes no
-    // outcome — a lower-case `content-type` and a `Content-Type` valued `undefined` both go red at
-    // the line above with or without it. It names the spelling that slipped through twice while the
+    // Redundant with the strict assertion above, and kept as a statement: `toStrictEqual` already
+    // fails on any extra key — a lower-case `content-type` and a `Content-Type` valued `undefined`
+    // both fail at the line above. It names the spelling that slipped through twice while the
     // assertion was `toEqual`.
     expect(Object.keys(sent).map((k) => k.toLowerCase())).not.toContain("content-type");
   });

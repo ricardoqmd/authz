@@ -70,7 +70,7 @@ this layer's guard, and a guard a layer cannot enforce is not a guard.
 | `CHOOSING_CONTEXT` | Two or more; `contexts` carries them. |
 | `NO_ACCESS_IN_APP` | The context is real and does not open this application. **Carries the list.** |
 | `IN_CONTEXT` | In a context; `permissions` carries the core session's own state. |
-| `UNAVAILABLE` | **The context list** could not be obtained. Not an expired session — nothing here suggests re-authenticating. |
+| `UNAVAILABLE` | **The context list** could not be obtained, or what arrived was not a list of contexts — not an array, one with elements none of whose `contextId`, read, is a string, or one with an element whose reading throws. Not an expired session — nothing here suggests re-authenticating. |
 
 **`IN_CONTEXT` nests the core's state rather than flattening it.** Flattening would make this
 package re-declare every state the core has, so every state the core ever adds would break this
@@ -99,14 +99,22 @@ if you need to suppress the repeat.
 ## Behaviour
 
 - **`start()`** lists. None → `NO_CONTEXTS`. Exactly one → activated with no picker: *one context is
-  not a choice.* Two or more → `CHOOSING_CONTEXT`.
+  not a choice.* Two or more → `CHOOSING_CONTEXT`. What is counted is the contexts the answer names:
+  an element whose `contextId`, read, is not a string is left out, and an answer that is not an
+  array, names no context among the elements it arrived with, or holds an element whose reading throws
+  — the element itself, its `contextId` or its `hasAccess` — is `UNAVAILABLE`. So is one holding an
+  element that is a function, or one that gains an element while it is read: neither is known to name
+  no context. Each element's `contextId` and `hasAccess` are read once, there, and a context is
+  entered as they read then.
 - **A context with `hasAccess === false` is not asked about at all** — no session is built. Asking and
   inferring "no access" from an empty answer confuses two different screens.
 - **Switching** closes the outgoing session, discards it, and builds the new one. **Discarded, not
   kept warm:** N contexts would otherwise mean N live decision caches, never mixed but bounded by
   nothing. The cost is paid on a switch *back* — the menu and every decision are asked again.
 - **`selectContext(id)`** throws `RangeError` on an unknown id; the ids come from this session, so
-  that is a programming error. A closed session does not raise it either: inert means inert.
+  that is a programming error. A closed session does not raise it either: inert means inert. A context
+  the list names more than once is entered the most restrictive way it is named: if one of them says
+  it does not open the application, that one is taken.
 - **`close()`** closes the active session, emits one final `IDLE` and then drops the listeners.
 
 ## The seam, and its rule
