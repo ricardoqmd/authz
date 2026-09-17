@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import * as api from "./index.js";
 import type {
   AuthorizationContext,
+  ContextDiagnostic,
   ContextSession,
   ContextSessionOptions,
   ContextSessionState,
@@ -30,6 +31,7 @@ describe("the public surface", () => {
       session?: ContextSession;
       options?: ContextSessionOptions;
       state?: ContextSessionState;
+      diagnostic?: ContextDiagnostic;
     } = {};
     expect(witness).toEqual({});
   });

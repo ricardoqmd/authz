@@ -13,6 +13,7 @@ export { AuthorizationTransportError } from "./transport.js";
 export { splitDecisionRequest } from "./batch.js";
 
 export type {
+  AuthorizationDiagnostic,
   AuthorizationSession,
   AuthorizationSessionOptions,
   AuthorizationState,

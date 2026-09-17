@@ -145,8 +145,9 @@ has to fold the type into the action (`orders:read`) to keep the entries distinc
 
 **`UNAVAILABLE` carries no `reason`, on purpose.** The text would come from your transport, which
 got it from a server, and this package cannot know what is safe to carry in someone else's error
-string — it would be one `render` away from a screen. Diagnostics belong to the transport, which
-still holds the original error.
+string — it would be one `render` away from a screen. Which rule put the session there reaches
+[`onDiagnostic`](#why-something-did-not-happen-ondiagnostic), when you give one, as a reason this
+package names, and never as that text.
 
 ### `decide()`
 
@@ -243,9 +244,65 @@ guarantees is that the answer is thrown away.
 ### A listener owns its own errors
 
 If a listener throws, the throw is caught and discarded: the other listeners still receive the
-emission and the publishing call completes. **It is not reported anywhere** — no callback, no
-console, no state — because this package deliberately has no diagnostic channel. Do your own error
-handling inside the listener.
+emission and the publishing call completes. **It is not reported anywhere** — not to `onDiagnostic`,
+not to the console, not in the state: what a listener throws is your own error, and an event carries
+only values this package built. Do your own error handling inside the listener.
+
+### Why something did not happen: `onDiagnostic`
+
+```ts
+createAuthorizationSession({ app: "app-a", transport, maxPairsPerRequest: 100, onDiagnostic: (event) => log(event) });
+```
+
+**Optional**, and nothing the session decides, emits, caches or returns depends on whether you give
+it. Each event is a frozen object with a `kind` and the fields that kind declares — data to filter on,
+not a message to parse:
+
+| `kind` | raised when | fields |
+|---|---|---|
+| `menu-requested` | `start()` asks the transport for the menu | `restart`: `false` for the first `start()` of a session, `true` after |
+| `menu-unavailable` | `start()` settles on `UNAVAILABLE` | `reason`: `rejected`, `not-a-menu`, `other-app`, `unreadable-entry`, `no-action-named` |
+| `chunk-failed` | one chunk of a `decide()` is refused whole, for one of the reasons in the next column | `reason`: `rejected`, `no-list`, `other-app` · `resourceType` · `pairs` |
+| `call-emptied` | a `decide()` resolves with the empty list because an answer, or an element of one, cannot be read at all | `resourceType` · `pairs` |
+| `answer-discarded` | what a `start()` or a `decide()` was waiting for arrives after a later `start()` or a `close()` | `operation`: `start`, `decide` |
+| `from-cache` | a `decide()` is answered from the cache, without asking the transport | `resourceType` · `pairs` |
+
+**Every field holds a value this package built** — a reason or an operation named in that table, a
+count, a flag, or the `resourceType` of your own request. None holds a token, a header, an error, or
+anything read out of an answer.
+
+**It is called in a task of its own.** Each event is handed over through `setTimeout`, never from
+inside a call of this package, and nothing this package does waits for it: what it returns is not
+read, so a promise it returns is not awaited and its rejection is not caught. **What it throws is
+discarded**, and the session carries on as if it had not been called. Like any code, a callback that
+blocks the thread blocks everything that runs on it. Under fake timers, an event waits for the clock
+to be advanced like any other timer. It must be a function, or the constructor throws a `RangeError`.
+
+**One screen hearing `menu-requested` with `restart: false` more than once built more than one
+session**, and each of them asked for the menu. Measured over HTTP: a screen that built its session on
+every render asked for the menu six times in six renders, and was told `restart: false` six times;
+built once, it asked once. A function written inline is a new function on every render, so a session
+rebuilt whenever its token getter changes is rebuilt on every render.
+
+**Under a context session, up to one `restart: false` for each `session-built` is expected, and not a reason
+to look.** Every activation of a context with access builds a session, and the context session's `session-built`
+counts them. Each accounts for at most one `restart: false`, and for none when that session was given no
+callback, was closed before the context session started it, or had already been started. Measured with one
+callback for every session, the context session's included: entering three contexts gave three `restart: false`
+and three `session-built`; six renders that rebuilt the session inside one context gave seven `restart: false`
+against one `session-built`. **There, a `restart: false` count above the `session-built` count means sessions
+started outside the context session, and those are the ones to look at; a count that does not go above it does
+not rule them out.**
+
+## Testing a screen that uses it
+
+**A negative assertion passes before the answer arrives.** This package keeps its own cache and its own
+state of what is in flight, so a helper that waits until your own request cache has nothing in flight
+does not wait for the menu: it can return while the state is still `LOADING`, and *the button is not
+drawn* passes then, whether or not the answer would have drawn it. Wait for what draws the element
+instead: for the menu, the state leaving `LOADING`; for a decision, the promise `decide()` returned. And pair
+each negative assertion with a positive one on the same screen, so that a test that asserts too early
+fails instead of passing.
 
 ## What is not here
 

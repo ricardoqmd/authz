@@ -1,6 +1,7 @@
 export type { AuthorizationContext, ContextTransport } from "./context.js";
 
 export type {
+  ContextDiagnostic,
   ContextSession,
   ContextSessionOptions,
   ContextSessionState,

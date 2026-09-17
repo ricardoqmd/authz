@@ -194,6 +194,125 @@ describe("a response whose context does not echo the one sent is rejected LOUDLY
   });
 });
 
+describe("the echo field is configuration, and the echo is still a guard under any name", () => {
+  const FIELD = "contractId";
+
+  it("reads the echo under the configured field, on both routes", async () => {
+    const s = stub(byRoute({ [FIELD]: CTX }));
+    const t = withContext({ fetch: s.fetchDouble, contextField: FIELD });
+
+    await expect(t.fetchPermissions(APP)).resolves.toEqual(MENU);
+    await expect(t.fetchDecisions(APP, REQUEST)).resolves.toEqual(SET);
+  });
+
+  it("refuses an echo of a different context under the configured field", async () => {
+    const s = stub(byRoute({ [FIELD]: "ctx-b" }));
+    const t = withContext({ fetch: s.fetchDouble, contextField: FIELD });
+
+    await expect(t.fetchPermissions(APP)).rejects.toThrow(
+      /\/me\/apps\/app-a\/permissions: the response "contractId" does not echo the one that was sent/,
+    );
+    await expect(t.fetchDecisions(APP, REQUEST)).rejects.toThrow(/"contractId" does not echo/);
+  });
+
+  it("refuses an answer without the configured field, naming the field and the route", async () => {
+    const s = stub(byRoute());
+    const t = withContext({ fetch: s.fetchDouble, contextField: FIELD });
+
+    await expect(t.fetchPermissions(APP)).rejects.toThrow(
+      /\/me\/apps\/app-a\/permissions: the response is missing the "contractId" field, or it is not a string/,
+    );
+    await expect(t.fetchDecisions(APP, REQUEST)).rejects.toThrow(/missing the "contractId" field/);
+  });
+
+  it("does not count an echo under the default name once another field is configured", async () => {
+    const s = stub(byRoute({ contextId: CTX }));
+    const t = withContext({ fetch: s.fetchDouble, contextField: FIELD });
+
+    await expect(t.fetchPermissions(APP)).rejects.toThrow(/missing the "contractId" field/);
+  });
+
+  it("refuses an echo under the configured field that is not a string", async () => {
+    for (const echoed of [42, null, [CTX], { value: CTX }, true]) {
+      const s = stub(() => json({ ...MENU, [FIELD]: echoed }));
+      const t = withContext({ fetch: s.fetchDouble, contextField: FIELD });
+
+      await expect(t.fetchPermissions(APP)).rejects.toThrow(/missing the "contractId" field, or it is not a string/);
+    }
+  });
+
+  it("reads the configured field once, with an ordinary read, and judges what that read gave", async () => {
+    // A body whose echo answers the configured id on its first read and another id afterwards. JSON
+    // cannot say that, so the double hands back the object itself instead of a serialised body.
+    let reads = 0;
+    const body = {
+      app: APP,
+      permissions: [],
+      get [FIELD]() {
+        reads += 1;
+        return reads === 1 ? CTX : "ctx-b";
+      },
+    };
+    const fetchDouble = (async () =>
+      ({ ok: true, status: 200, json: async () => body }) as unknown as Response) as typeof globalThis.fetch;
+    const t = withContext({ fetch: fetchDouble, contextField: FIELD });
+
+    await expect(t.fetchPermissions(APP)).resolves.toEqual({ app: APP, permissions: [] });
+    expect(reads).toBe(1);
+  });
+
+  it("reads a field named after a member of every object from the body, not from the prototype", async () => {
+    // JSON.parse defines "__proto__" as an own field of the body, so it is read like any other name.
+    const own = stub(() => new Response(`{"app":"${APP}","permissions":[],"__proto__":"${CTX}"}`));
+    await expect(
+      withContext({ fetch: own.fetchDouble, contextField: "__proto__" }).fetchPermissions(APP),
+    ).resolves.toEqual({ app: APP, permissions: [] });
+
+    // Absent from the body, "constructor" reads the function every object inherits: not a string.
+    const inherited = stub(() => json(MENU));
+    await expect(
+      withContext({ fetch: inherited.fetchDouble, contextField: "constructor" }).fetchPermissions(APP),
+    ).rejects.toThrow(/missing the "constructor" field/);
+  });
+
+  it("refuses at construction a field that is empty or not a string, naming the type and never the value", () => {
+    const secret = { toString: () => "field-secret" };
+    const cases: [unknown, string][] = [
+      ["", "an empty string"],
+      [42, "number"],
+      [null, "null"],
+      [["contractId"], "an array"],
+      [secret, "object"],
+    ];
+    for (const [value, received] of cases) {
+      const build = () =>
+        createHttpTransport({
+          baseUrl: BASE,
+          getToken: () => null,
+          contextId: CTX,
+          contextHeader: HEADER,
+          contextField: value as string,
+        });
+      expect(build).toThrow(RangeError);
+      expect(build).toThrow(`contextField must be a non-empty string, received ${received}`);
+      expect(build).not.toThrow(/field-secret/);
+    }
+  });
+
+  it("refuses an unusable field at construction even without the context pair, and sends nothing", () => {
+    const s = stub(byRoute());
+    expect(() => transport({ fetch: s.fetchDouble, contextField: "" })).toThrow(RangeError);
+    expect(s.calls).toHaveLength(0);
+  });
+
+  it("does not read the configured field when no contextId is supplied", async () => {
+    const s = stub(byRoute({ [FIELD]: "ctx-b" }));
+    const t = transport({ fetch: s.fetchDouble, contextField: FIELD });
+
+    await expect(t.fetchPermissions(APP)).resolves.toEqual(MENU);
+  });
+});
+
 /* 3 — the app echo, which did NOT move ------------------------------------ */
 
 describe("the app echo stays here, and is required in every mode", () => {

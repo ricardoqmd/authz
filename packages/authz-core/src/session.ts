@@ -84,10 +84,69 @@ export type AuthorizationState =
    * purpose:** the
    * text would come from the consumer's own transport, which got it from a server, and this
    * package has no way to know what is safe to carry in someone else's error string — it
-   * would be one `render` away from a screen, unbounded and unlabelled. Diagnostics belong
-   * to the transport, which already holds the original error.
+   * would be one `render` away from a screen, unbounded and unlabelled. Which rule put the session
+   * here reaches `onDiagnostic`, when one is given, as a reason this package names, and never as
+   * that text.
    */
   | { readonly status: "UNAVAILABLE" };
+
+/**
+ * What a session tells {@link AuthorizationSessionOptions.onDiagnostic}: why something did not happen,
+ * and when an answer came from the cache instead of the transport.
+ *
+ * **Data, not a message.** Every event is a new frozen object with a `kind` and the fields its kind
+ * declares, and every field holds a value this package built: a reason or an operation named here, a
+ * count, a flag, or the `resourceType` of the request the call was made with. None holds a token, a
+ * header, an error, or anything read out of an answer.
+ */
+export type AuthorizationDiagnostic =
+  /**
+   * `start()` asked the transport for the menu. `restart` is `false` for the first `start()` of a
+   * session and `true` for every later one, so a screen that raises this more than once with
+   * `restart: false` built more than one session. A context session builds one on every activation of a context
+   * with access, and its `session-built` counts them: each accounts for at most one `restart: false`.
+   */
+  | { readonly kind: "menu-requested"; readonly restart: boolean }
+  /**
+   * `start()` settled on `UNAVAILABLE`, and `reason` says which rule put it there:
+   *
+   * - `rejected` — asking for the menu threw or rejected, with anything but a `NO_ACCESS_IN_APP` error;
+   * - `not-a-menu` — the answer holds no list of entries, or cannot be read as one;
+   * - `other-app` — the answer's `app` is not this application;
+   * - `unreadable-entry` — an entry cannot be read at all, or the list gained one while it was read;
+   * - `no-action-named` — the menu arrived with entries and none of them names its action.
+   */
+  | {
+      readonly kind: "menu-unavailable";
+      readonly reason: "rejected" | "not-a-menu" | "other-app" | "unreadable-entry" | "no-action-named";
+    }
+  /**
+   * One chunk of a `decide()` call was refused whole, so the `pairs` it asked for are absent unless
+   * another chunk of the call asked for them too. `reason`: `rejected` — asking for it threw or
+   * rejected; `no-list` — its answer holds no list; `other-app` — its answer's `app` is not this
+   * application.
+   */
+  | {
+      readonly kind: "chunk-failed";
+      readonly reason: "rejected" | "no-list" | "other-app";
+      readonly resourceType: string;
+      readonly pairs: number;
+    }
+  /**
+   * A `decide()` call resolved with the empty list because an answer, or an element of one, could not
+   * be read at all. `pairs` is the number of pairs the request asks for.
+   */
+  | { readonly kind: "call-emptied"; readonly resourceType: string; readonly pairs: number }
+  /**
+   * An answer arrived after a later `start()` or a `close()` and was not used: the menu of a `start()`,
+   * or the answers of a `decide()`, which resolved with the empty list.
+   */
+  | { readonly kind: "answer-discarded"; readonly operation: "start" | "decide" }
+  /**
+   * A `decide()` call was answered from the cache, without asking the transport. `pairs` is the number
+   * of pairs the request asks for.
+   */
+  | { readonly kind: "from-cache"; readonly resourceType: string; readonly pairs: number };
 
 /** What {@link createAuthorizationSession} needs to exist. */
 export interface AuthorizationSessionOptions {
@@ -116,6 +175,20 @@ export interface AuthorizationSessionOptions {
    * not a default anyone should arrive at by accident.
    */
   readonly maxCachedDecisions?: number;
+  /**
+   * Told why something did not happen, as an {@link AuthorizationDiagnostic}. **Optional**, and nothing
+   * the session decides, emits, caches or returns depends on whether it is given.
+   *
+   * **Called in a task of its own.** Each event is handed to it through `setTimeout`, never from inside
+   * a call of this package, and nothing this package does waits for it: what it returns is not read, so
+   * a promise it returns is not awaited and its rejection is not caught. Like any code, a callback that
+   * blocks the thread blocks everything that runs on it.
+   *
+   * **What it throws is discarded**, and the session carries on as if it had not been called.
+   *
+   * It must be a function, or the constructor throws a `RangeError`.
+   */
+  readonly onDiagnostic?: (event: AuthorizationDiagnostic) => void;
 }
 
 /** The session. */
@@ -131,11 +204,10 @@ export interface AuthorizationSession {
    * escaped into this package, and during `close()` it was permanent: the listeners were never
    * dropped and the session never closed.
    *
-   * **The throw is swallowed and NOT reported anywhere** — no callback, no console, no state.
-   * This package deliberately has no diagnostic channel: `UNAVAILABLE` carries no `reason` for
-   * the same reason, because an error string from someone else's code is one `render` away from
-   * a screen. So a listener that throws silently loses that emission and nothing tells it. Do
-   * your own error handling inside the listener.
+   * **The throw is swallowed and NOT reported anywhere** — not to `onDiagnostic`, not to the console,
+   * not in the state: what a listener throws is the consumer's own error, and an event carries only
+   * values this package built. So a listener that throws silently loses that emission and nothing
+   * tells it. Do your own error handling inside the listener.
    */
   subscribe(listener: (state: AuthorizationState) => void): () => void;
   /** Load the menu and settle into a state. Safe to call again; see the implementation. */
@@ -217,7 +289,7 @@ export interface AuthorizationSession {
 export function createAuthorizationSession(
   options: AuthorizationSessionOptions,
 ): AuthorizationSession {
-  const { app, transport, maxPairsPerRequest, maxCachedDecisions = 5000 } = options;
+  const { app, transport, maxPairsPerRequest, maxCachedDecisions = 5000, onDiagnostic } = options;
 
   if (!Number.isInteger(maxCachedDecisions) || maxCachedDecisions < 1) {
     throw new RangeError(
@@ -226,6 +298,7 @@ export function createAuthorizationSession(
       )}`,
     );
   }
+  const notify = notifier(onDiagnostic);
 
   let state: AuthorizationState = { status: "IDLE" };
 
@@ -349,12 +422,14 @@ export function createAuthorizationSession(
       // family on `close()`.
       decisionCache.clear();
       setState({ status: "LOADING" });
+      notify?.({ kind: "menu-requested", restart: issuedAt > 1 });
 
       let menu;
       try {
         menu = await transport.fetchPermissions(app);
       } catch (error) {
         if (issuedAt !== generation) {
+          notify?.({ kind: "answer-discarded", operation: "start" });
           return;
         }
         // A failed fetch is never `READY` with an empty list: an empty menu is
@@ -364,11 +439,13 @@ export function createAuthorizationSession(
           setState({ status: "NO_ACCESS_IN_APP" });
         } else {
           setState({ status: "UNAVAILABLE" });
+          notify?.({ kind: "menu-unavailable", reason: "rejected" });
         }
         return;
       }
 
       if (issuedAt !== generation) {
+        notify?.({ kind: "answer-discarded", operation: "start" });
         return;
       }
       // A menu labelled with another application is a broken answer. Rendering it under the
@@ -384,6 +461,10 @@ export function createAuthorizationSession(
       const received = envelopeOf(menu, "permissions");
       if (received === undefined || received === UNREADABLE || received.app !== app) {
         setState({ status: "UNAVAILABLE" });
+        notify?.({
+          kind: "menu-unavailable",
+          reason: received === undefined || received === UNREADABLE ? "not-a-menu" : "other-app",
+        });
         return;
       }
       // An entry that does not name its action is discarded, as `decide` discards an element that
@@ -405,6 +486,7 @@ export function createAuthorizationSession(
         const entry = copied(element as PermissionEntry, ENTRY_FIELDS, ENTRY_IDENTITY);
         if (entry === UNREADABLE) {
           setState({ status: "UNAVAILABLE" });
+          notify?.({ kind: "menu-unavailable", reason: "unreadable-entry" });
           return;
         }
         if (!namesAction(entry)) {
@@ -416,6 +498,7 @@ export function createAuthorizationSession(
       // A position the list gained while its entries were read was never read. Same rule.
       if (received.grew()) {
         setState({ status: "UNAVAILABLE" });
+        notify?.({ kind: "menu-unavailable", reason: "unreadable-entry" });
         return;
       }
       // A MENU THAT ARRIVED WITH ENTRIES AND KEPT NONE IS NOT AN EMPTY MENU. An empty menu is a
@@ -425,6 +508,7 @@ export function createAuthorizationSession(
       // `READY`, and a non-empty menu none of whose entries names its action is `UNAVAILABLE`.
       if (received.list.length > 0 && byAction.size === 0) {
         setState({ status: "UNAVAILABLE" });
+        notify?.({ kind: "menu-unavailable", reason: "no-action-named" });
         return;
       }
       setState({ status: "READY", permissions: [...byAction.values()] });
@@ -587,6 +671,7 @@ export function createAuthorizationSession(
         cached.push(transparentCopy(hit, DECISION_FIELDS));
       }
       if (allCached) {
+        notify?.({ kind: "from-cache", resourceType: asked.resourceType, pairs: wanted.length });
         return cached;
       }
 
@@ -614,6 +699,7 @@ export function createAuthorizationSession(
       // A later `start()` or a `close()` landed while the answers were in flight. Not merged,
       // not cached, not returned.
       if (issuedAt !== generation) {
+        notify?.({ kind: "answer-discarded", operation: "decide" });
         return [];
       }
 
@@ -668,6 +754,7 @@ export function createAuthorizationSession(
       for (let index = 0; index < settled.length; index += 1) {
         const result = settled[index];
         if (result === undefined || result.status !== "fulfilled") {
+          notify?.(chunkFailed("rejected", chunks[index]));
           continue;
         }
         // A response labelled with another app is discarded WHOLE: not merged, not cached. The
@@ -682,9 +769,11 @@ export function createAuthorizationSession(
         // every pair of the call absent, as an element that cannot be read does below.
         const answer = envelopeOf(result.value, "decisions");
         if (answer === UNREADABLE) {
+          notify?.({ kind: "call-emptied", resourceType: asked.resourceType, pairs: wanted.length });
           return [];
         }
         if (answer === undefined || answer.app !== app) {
+          notify?.(chunkFailed(answer === undefined ? "no-list" : "other-app", chunks[index]));
           continue;
         }
         read.push(answer);
@@ -699,6 +788,7 @@ export function createAuthorizationSession(
           // another chunk's, since a pair can arrive from either — and dropped, that PERMIT would be
           // returned and cached. Nothing has been cached yet. See `copied`.
           if (decision === UNREADABLE) {
+            notify?.({ kind: "call-emptied", resourceType: asked.resourceType, pairs: wanted.length });
             return [];
           }
           // An element that does not name its pair is discarded, like a pair nobody asked for,
@@ -721,6 +811,7 @@ export function createAuthorizationSession(
       // for any pair. Asked once every element has been judged, since reading an element can be what
       // makes a list grow — its own or another answer's. Nothing has been cached yet.
       if (read.some((answer) => answer.grew())) {
+        notify?.({ kind: "call-emptied", resourceType: asked.resourceType, pairs: wanted.length });
         return [];
       }
 
@@ -1091,4 +1182,48 @@ function pairsOf(
     }
   }
   return out;
+}
+
+/**
+ * How a session tells `onDiagnostic`, or `undefined` when no callback was given, and then no event is built
+ * and nothing is scheduled.
+ *
+ * The event is handed over in a task of its own, inside a `try`: the callback is the consumer's code,
+ * and neither what it throws nor how long it takes belongs to the call that raised the event.
+ */
+function notifier(onDiagnostic: unknown): ((event: AuthorizationDiagnostic) => void) | undefined {
+  if (onDiagnostic === undefined) {
+    return undefined;
+  }
+  if (typeof onDiagnostic !== "function") {
+    throw new RangeError(`onDiagnostic must be a function, received ${typeName(onDiagnostic)}`);
+  }
+  const callback = onDiagnostic as (event: AuthorizationDiagnostic) => void;
+  return (event) => {
+    const frozen = Object.freeze(event);
+    setTimeout(() => {
+      try {
+        callback(frozen);
+      } catch {
+        // Discarded. See `onDiagnostic`.
+      }
+    }, 0);
+  };
+}
+
+/** The type of a value a caller gave, for a message that must not carry the value itself. */
+function typeName(value: unknown): string {
+  return value === null ? "null" : Array.isArray(value) ? "an array" : typeof value;
+}
+
+function chunkFailed(
+  reason: "rejected" | "no-list" | "other-app",
+  chunk: DecisionRequest | undefined,
+): AuthorizationDiagnostic {
+  return {
+    kind: "chunk-failed",
+    reason,
+    resourceType: chunk?.resourceType ?? "",
+    pairs: chunk === undefined ? 0 : chunk.actions.length * chunk.resourceIds.length,
+  };
 }

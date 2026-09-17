@@ -90,6 +90,32 @@ export type ContextSessionState =
    */
   | { readonly status: "UNAVAILABLE" };
 
+/**
+ * What a context session tells {@link ContextSessionOptions.onDiagnostic}: why something did not happen,
+ * and when a permissions session was built.
+ *
+ * **Data, not a message.** Every event is a new frozen object with a `kind` and the fields its kind
+ * declares, and every field holds a value this package built: a reason or an operation named here. None
+ * holds a context, an identifier, an error, or anything read out of an answer.
+ */
+export type ContextDiagnostic =
+  /**
+   * `buildSession` returned: once for every activation of a context whose `hasAccess`, as
+   * read when the list was judged, is truthy, and a context entered again is activated again.
+   */
+  | { readonly kind: "session-built" }
+  /**
+   * `start()` settled on `UNAVAILABLE`. `reason`: `rejected` — asking for the list threw or rejected;
+   * `not-a-list` — what arrived was not a list of contexts.
+   */
+  | { readonly kind: "listing-unavailable"; readonly reason: "rejected" | "not-a-list" }
+  /**
+   * What a call was waiting for arrived after a later `start()`, `selectContext()` or `close()`, and was
+   * not used: the list of a `start()`, the menu an activation started, or the decisions of a
+   * `decide()`, which resolved with the empty list.
+   */
+  | { readonly kind: "answer-discarded"; readonly operation: "listing" | "activation" | "decide" };
+
 /** What {@link createContextSession} needs to exist. */
 export interface ContextSessionOptions {
   /** The application being asked about. Passed to the transport unchanged. */
@@ -107,6 +133,21 @@ export interface ContextSessionOptions {
    * {@link ContextSession.close}.
    */
   readonly buildSession: (contextId: string) => AuthorizationSession;
+  /**
+   * Told why something did not happen, as a {@link ContextDiagnostic}. **Optional**, and nothing the
+   * session decides, emits or returns depends on whether it is given.
+   *
+   * **Called in a task of its own.** Each event is handed to it through `setTimeout`, never from inside
+   * a call of this package, and nothing this package does waits for it: what it returns is not read, so
+   * a promise it returns is not awaited and its rejection is not caught. Like any code, a callback that
+   * blocks the thread blocks everything that runs on it.
+   *
+   * **What it throws is discarded**, and the session carries on as if it had not been called.
+   *
+   * It is this session's own: a permissions session built by `buildSession` tells the callback that
+   * session was given, if any. It must be a function, or the constructor throws a `RangeError`.
+   */
+  readonly onDiagnostic?: (event: ContextDiagnostic) => void;
 }
 
 /** The session. */
@@ -114,13 +155,27 @@ export interface ContextSession {
   /** The current state. Synchronous, always defined. */
   getState(): ContextSessionState;
   /**
+   * The contexts as of the last listing: the ones the last listing named, or `undefined` when that
+   * listing returned no list of contexts — it failed, or what arrived was not a list of contexts — when
+   * no listing has ended yet, and after `close()`. An empty array is a listing that named no context. A
+   * listing superseded by a later `start()` or by `close()` is not the last listing.
+   *
+   * **It is not part of the state because nothing refreshes it:** a state says what is current, and this
+   * list is only as current as the listing that returned it.
+   *
+   * Each call returns a new array, so what a caller does to it changes nothing this session holds. Its
+   * elements are the contexts as the listing returned them, the same objects a state that carries
+   * `contexts` holds.
+   */
+  lastListedContexts(): readonly AuthorizationContext[] | undefined;
+  /**
    * Observe changes. Returns a function that stops the subscription.
    *
    * **A listener owns its own errors.** If it throws, the throw is caught and discarded: the other
    * listeners still receive the emission, and the call that was publishing completes as if nothing
-   * had happened. It is **not reported anywhere** — no callback, no console, no state — because
-   * this package deliberately has no diagnostic channel, for the same reason `UNAVAILABLE` carries
-   * no `reason`.
+   * had happened. It is **not reported anywhere** — not to `onDiagnostic`, not to the console, not in the
+   * state: what a listener throws is the consumer's own error, and an event carries only values this
+   * package built.
    *
    * **A LISTENER CAN BE CALLED MORE THAN ONCE FOR THE SAME TRANSITION, WITH AN EQUAL VALUE.**
    * Settling into a context notifies twice: the subscription this package holds on the permissions
@@ -173,11 +228,17 @@ export interface ContextSession {
 }
 
 export function createContextSession(options: ContextSessionOptions): ContextSession {
-  const { app, contextTransport, buildSession } = options;
+  const { app, contextTransport, buildSession, onDiagnostic } = options;
+  const notify = notifier(onDiagnostic);
 
   let state: ContextSessionState = { status: "IDLE" };
   /** The contexts the last usable list named, each with what was read of it. See {@link contextsOf}. */
   let contexts: readonly Listed[] = [];
+  /**
+   * The list `lastListedContexts` hands out: `undefined` where `contexts` is empty because no list
+   * is held, so that a listing that named no context and a listing that returned none stay apart.
+   */
+  let lastListing: readonly Listed[] | undefined = undefined;
   let activeSession: AuthorizationSession | undefined;
   let unsubscribeFromSession: (() => void) | undefined;
 
@@ -405,6 +466,7 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
     }
 
     const session = buildSession(contextId);
+    notify?.({ kind: "session-built" });
     activeSession = session;
     unsubscribeFromSession = session.subscribe((permissions) => {
       // A late emission from a session this layer has already discarded must not paint. The
@@ -438,6 +500,7 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
     await session.start();
     // THE RE-CHECK. `start()` is a suspension point a context change can supersede.
     if (issuedAt !== generation) {
+      notify?.({ kind: "answer-discarded", operation: "activation" });
       return;
     }
     setState({
@@ -448,6 +511,10 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
   }
 
   return {
+    lastListedContexts() {
+      return lastListing === undefined ? undefined : lastListing.map((listed) => listed.context);
+    },
+
     getState() {
       return state;
     },
@@ -514,6 +581,7 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
         available = await contextTransport.listContexts(app);
       } catch {
         if (issuedAt !== generation) {
+          notify?.({ kind: "answer-discarded", operation: "listing" });
           return;
         }
         // THE LIST IS CLEARED, and that is a decision rather than tidiness. `contexts` is server
@@ -527,11 +595,14 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
         // session that looks real and denies everything; with an empty one they get a `RangeError`
         // at the call site, and the only way forward is a start that succeeded.
         contexts = [];
+        lastListing = undefined;
         setState({ status: "UNAVAILABLE" });
+        notify?.({ kind: "listing-unavailable", reason: "rejected" });
         return;
       }
 
       if (issuedAt !== generation) {
+        notify?.({ kind: "answer-discarded", operation: "listing" });
         return;
       }
       // AN ANSWER THAT IS NOT A LIST OF CONTEXTS IS NOT A LIST. `null` used to throw out of `start()`
@@ -541,10 +612,13 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
       const listed = contextsOf(available);
       if (listed === undefined) {
         contexts = [];
+        lastListing = undefined;
         setState({ status: "UNAVAILABLE" });
+        notify?.({ kind: "listing-unavailable", reason: "not-a-list" });
         return;
       }
       contexts = listed;
+      lastListing = listed;
 
       if (listed.length === 0) {
         setState({ status: "NO_CONTEXTS" });
@@ -599,6 +673,7 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
       // `close()` on the outgoing session is not enough on its own — this promise was already in
       // flight and resolves regardless.
       if (issuedAt !== generation) {
+        notify?.({ kind: "answer-discarded", operation: "decide" });
         return [];
       }
       return decisions;
@@ -610,6 +685,7 @@ export function createContextSession(options: ContextSessionOptions): ContextSes
       }
       generation += 1;
       discardSession();
+      lastListing = undefined;
 
       // THE FLAG BEFORE THE EMISSION. Set after it instead, a listener re-entering `start()` or
       // `selectContext()` from the final IDLE would be served by a session that is closing — and
@@ -690,4 +766,34 @@ function contextsOf(value: unknown): readonly Listed[] | undefined {
   } catch {
     return undefined;
   }
+}
+/**
+ * How a session tells `onDiagnostic`, or `undefined` when no callback was given, and then no event is built
+ * and nothing is scheduled.
+ *
+ * The event is handed over in a task of its own, inside a `try`: the callback is the consumer's code,
+ * and neither what it throws nor how long it takes belongs to the call that raised the event.
+ */
+function notifier(onDiagnostic: unknown): ((event: ContextDiagnostic) => void) | undefined {
+  if (onDiagnostic === undefined) {
+    return undefined;
+  }
+  if (typeof onDiagnostic !== "function") {
+    throw new RangeError(
+      `onDiagnostic must be a function, received ${
+        onDiagnostic === null ? "null" : Array.isArray(onDiagnostic) ? "an array" : typeof onDiagnostic
+      }`,
+    );
+  }
+  const callback = onDiagnostic as (event: ContextDiagnostic) => void;
+  return (event) => {
+    const frozen = Object.freeze(event);
+    setTimeout(() => {
+      try {
+        callback(frozen);
+      } catch {
+        // Discarded. See `onDiagnostic`.
+      }
+    }, 0);
+  };
 }

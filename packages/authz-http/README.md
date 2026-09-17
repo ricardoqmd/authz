@@ -11,6 +11,15 @@ answers.
 pnpm add @ricardoqmd/authz-http @ricardoqmd/authz-core
 ```
 
+**Keep the two on the versions released together**: this package declares as its peer the minor of
+`@ricardoqmd/authz-core` it is released with. Paired with another minor, an install ends one of four ways,
+depending on the installer and its configuration: refused, and nothing changes; installed, with a warning;
+installed, without a word; or it ends in an error, with the pair installed anyway. The package still on the
+older release then lacks what the newer release added: an option it does not know is ignored when the code
+runs — a `contextField` given to an older release of this package leaves the echo read from `contextId`, so an
+answer is used or refused on that field and not on the one you named. The types say so for an option only when
+it is written in an object literal where the configuration is expected.
+
 ```ts
 import { createAuthorizationSession } from "@ricardoqmd/authz-core";
 import { createHttpTransport } from "@ricardoqmd/authz-http";
@@ -55,7 +64,7 @@ that the answer is about it.
 | `contextId` | `contextHeader` | What happens |
 |---|---|---|
 | absent | absent | **No header is sent and no echo is required.** A backend that has never heard of contexts works unchanged. This is the default. |
-| present | present | The header carries the id, and **an answer whose `contextId` does not echo it is rejected loudly** — as is one that omits the field. |
+| present | present | The header carries the id, and **an answer whose echo field does not echo it is rejected loudly** — as is one that omits the field. The echo field is `contextId`, or the name you give as `contextField`. |
 | one of the two | the other missing | **`RangeError` at construction**, naming which is missing. |
 
 ```ts
@@ -87,6 +96,32 @@ URL this package constructs**, and no accepted id contains a character any front
 transforms, so that segment now survives them too. See
 [Application ids that are refused](#application-ids-that-are-refused).
 
+### The echo field is configuration too
+
+A backend that echoes the context under another name is not wrong, so the name is yours to give, as
+the header's is:
+
+```ts
+createHttpTransport({
+  baseUrl: "https://api.example.com",
+  getToken: () => auth.accessToken ?? null,
+  contextId: currentContextId,
+  contextHeader: "X-Context-Id",
+  contextField: "tenantId", // the answer carries { "app": ..., "tenantId": ..., ... }
+});
+```
+
+**The name changes where the echo is read, and nothing about how it is judged.** An answer is used only
+when that field, read once, is a string equal to `contextId`; a missing field, one that is not a
+string, and one that echoes a different context are rejected, and the default name does not count
+once you give another. Measured through a session over HTTP, against a backend that echoes the
+context only under another name: without `contextField` the session is `UNAVAILABLE` and every
+decision `DENY`; with it, `READY` and what the backend permits.
+
+`contextField` must be a non-empty string, or the constructor throws a `RangeError` — an empty name,
+or one that is not a string, names no field an answer could carry. Without the context pair, no
+answer is asked to carry it.
+
 ## Configuration
 
 | Field | |
@@ -94,15 +129,21 @@ transforms, so that segment now survives them too. See
 | `baseUrl` | Where the two routes hang from. A trailing slash is fine. |
 | `contextId` | Optional. The authorization context to send and require an echo of. See the three modes above. |
 | `contextHeader` | Required only when `contextId` is given. **Configuration, never a constant** — this package does not know what your deployment calls its authorization context. |
+| `contextField` | Optional; `"contextId"` when omitted. The field of the answer that must echo `contextId`. See [The echo field is configuration too](#the-echo-field-is-configuration-too). |
 | `getToken` | Sync or async. Returning `null` omits the `Authorization` header **entirely**; an empty one is a different statement to a backend, and not the one we mean. |
 | `fetch` | Optional; defaults to the global. Injectable so you can wrap it — retries, tracing, your own tests — without this package having an opinion about any of it. This package asks each request once. On a connection that drops requests, a `fetch` that asks a failed one once more is what keeps a large screen from being asked again, and shown partly `DENY`, draw after draw: the core README has what it costs without one. |
 | `classifyError` | Optional. See below. |
 | `paths` | Optional, both entries optional. Where the two routes live. Defaults to the paths in the table above. See below. |
+| `onDiagnostic` | Optional. Told which rule refused a call. See [`onDiagnostic`](#ondiagnostic). |
 
 **No environment reads.** No `process.env`, no `import.meta.env`, no ambient globals: you know your
 bundler and this package must not.
 
 ## The routes are yours
+
+**The defaults are a convenience, and the paths are configuration.** They are two paths this package
+chose, and nothing ties them to what your backend serves. If your deployment depends on where the
+routes are, set `paths` — then the URL is the one you wrote, whatever the defaults are.
 
 **Pass nothing and nothing changes.** The defaults are the two paths this package used to hardcode,
 so the call you write today is the call you keep writing:
@@ -157,10 +198,12 @@ The returned path is joined to `baseUrl` verbatim, so it must be a non-empty str
 
 ### What a wrong path looks like from above, and why you must exercise both
 
-**Nothing prints anything.** Neither this package nor the core has a diagnostic channel, and no
-published code of either calls `console`. Through `createAuthorizationSession` the `RangeError` is
-caught and turned into state — and the two options do not produce the same state. Measured through
-a real core session, against a backend that permits `read` on `r-1`:
+**Nothing prints anything.** No published code of either package calls `console`. Through
+`createAuthorizationSession` the `RangeError` is caught and turned into state, and no diagnostic event
+names the option: this transport's `onDiagnostic` is told only of an `AuthorizationTransportError`,
+which this is not, and what a session's `onDiagnostic` hears of it is the reason `rejected`. And the
+two options do not produce the same state. Measured through a real core session, against a backend
+that permits `read` on `r-1`:
 
 | wrong option | session state | `decisionFor(read, r-1)` | console calls |
 |---|---|---|---|
@@ -336,3 +379,40 @@ classifyError: (status, body) =>
 value. The message is built from the route and the status and from nothing else. The core removed its
 own `reason` field precisely so that server text could not arrive one `render` away from a screen;
 this does not reintroduce the leak from below.
+
+### `onDiagnostic`
+
+```ts
+createHttpTransport({ baseUrl, getToken, onDiagnostic: (event) => log(event) });
+```
+
+**Optional**, and nothing the transport sends, returns or rejects with depends on whether you give
+it. Every call that rejects with an `AuthorizationTransportError` raises one event,
+`{ kind: "call-failed", operation, reason }`, a frozen object: `operation` is `permissions` for
+`fetchPermissions` and `decisions` for `fetchDecisions`, and `reason` is the rule that refused it.
+
+| `reason` | the rule |
+|---|---|
+| `no-response` | no response arrived: the token could not be obtained, or the request did not complete |
+| `status` | the response status is not in the 2xx range |
+| `not-json` | the body is not JSON |
+| `not-an-object` | the body is not an object |
+| `no-app` | the body's `app` is missing or not a string |
+| `no-list` | the body's `permissions` or `decisions` is missing or not an array |
+| `no-context-echo` | a `contextId` was configured and the echo field is missing or not a string |
+| `other-context` | the echo field echoes a different context |
+
+**Every field holds a value this package built.** No event holds a token, a header, a route, a status,
+a body, or anything else read out of a response. A `RangeError` — a path or an application id refused
+at call time — raises none.
+
+**It is called in a task of its own.** Each event is handed over through `setTimeout`, never from
+inside a call of this package, and nothing this package does waits for it: what it returns is not
+read, so a promise it returns is not awaited and its rejection is not caught. **What it throws is
+discarded**, and the transport carries on as if it had not been called. Like any code, a callback that
+blocks the thread blocks everything that runs on it. It must be a function, or the constructor throws
+a `RangeError`.
+
+A session built on this transport takes a callback of its own: the core's `onDiagnostic` tells what
+the session did with the rejection — a chunk that failed, a menu that became unavailable — and this one
+tells why the call was refused.
