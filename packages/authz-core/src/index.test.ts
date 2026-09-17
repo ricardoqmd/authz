@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import * as api from "./index.js";
 import type {
+  AuthorizationDiagnostic,
   AuthorizationSession,
   AuthorizationSessionOptions,
   AuthorizationState,
@@ -64,6 +65,7 @@ describe("the public surface", () => {
       session?: AuthorizationSession;
       options?: AuthorizationSessionOptions;
       state?: AuthorizationState;
+      diagnostic?: AuthorizationDiagnostic;
     } = {};
     expect(witness).toEqual({});
   });

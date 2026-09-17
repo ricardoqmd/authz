@@ -40,7 +40,7 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@ricardoqmd/authz-core": "^0.1.0"
+    "@ricardoqmd/authz-core": "^0.2.0"
   },
   "devDependencies": {
     "@ricardoqmd/authz-core": "workspace:*"

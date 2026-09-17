@@ -18,6 +18,14 @@ only the core.**
 pnpm add @ricardoqmd/authz-context @ricardoqmd/authz-core
 ```
 
+**Keep the two on the versions released together**: this package declares as its peer the minor of
+`@ricardoqmd/authz-core` it is released with. Paired with another minor, an install ends one of four ways,
+depending on the installer and its configuration: refused, and nothing changes; installed, with a warning;
+installed, without a word; or it ends in an error, with the pair installed anyway. The package still on the
+older release then lacks what the newer release added: an option it does not know is ignored when the code
+runs, and a method it does not have throws a `TypeError` when called. The types say so for a method, and for
+an option only when it is written in an object literal where the configuration is expected.
+
 ## The composition: two objects and a factory
 
 ```ts
@@ -54,8 +62,8 @@ interface ContextTransport {
 }
 ```
 
-`getState()` · `subscribe(listener)` · `start()` · `selectContext(id)` · `decide(request)` ·
-`close()`.
+`getState()` · `lastListedContexts()` · `subscribe(listener)` · `start()` · `selectContext(id)` ·
+`decide(request)` · `close()`.
 
 **The permissions session is never handed out.** A consumer holding one could call `decide` past
 this layer's guard, and a guard a layer cannot enforce is not a guard.
@@ -96,6 +104,27 @@ tolerates it; a counter, an analytics event or a one-shot navigation does not.
 place — so `prev === next` is always false and cannot be used to detect "unchanged". Compare by value
 if you need to suppress the repeat.
 
+### The list as of the last listing
+
+`IN_CONTEXT` carries no list, so a context selector that stays on screen once a context is chosen —
+in a header, say — can paint it from `lastListedContexts()`:
+
+| when | `lastListedContexts()` |
+|---|---|
+| before any listing has ended, the first one in flight included | `undefined` |
+| after a listing that named contexts — in `CHOOSING_CONTEXT`, `NO_ACCESS_IN_APP` and `IN_CONTEXT` alike | those contexts |
+| while a later listing is in flight | still the last one |
+| after a listing that named none | `[]` |
+| after a listing that failed, or whose answer was not a list of contexts | `undefined` |
+| after `close()` | `undefined` |
+
+**It is not part of the state because nothing refreshes it:** a state says what is current, and this
+list is only as current as the listing that returned it. `undefined` is no list held, and `[]` is a
+listing that named no context. A listing superseded by a later `start()` or by `close()` is not the
+last listing. Each call returns a new array, so writing into it changes nothing the session holds; its
+elements are the contexts as the listing returned them, the same objects a state that carries
+`contexts` holds. It already holds the new list when the state that follows the listing is emitted.
+
 ## Behaviour
 
 - **`start()`** lists. None → `NO_CONTEXTS`. Exactly one → activated with no picker: *one context is
@@ -116,6 +145,33 @@ if you need to suppress the repeat.
   the list names more than once is entered the most restrictive way it is named: if one of them says
   it does not open the application, that one is taken.
 - **`close()`** closes the active session, emits one final `IDLE` and then drops the listeners.
+
+## Why something did not happen: `onDiagnostic`
+
+```ts
+createContextSession({ app: "app-a", contextTransport, buildSession, onDiagnostic: (event) => log(event) });
+```
+
+**Optional**, and nothing the session decides, emits or returns depends on whether you give it. It is
+this session's own: a permissions session built by `buildSession` tells the callback that session was
+given, if any — so pass one there too if you want to hear the core. Each event is a frozen object with
+a `kind` and the fields that kind declares:
+
+| `kind` | raised when | fields |
+|---|---|---|
+| `session-built` | `buildSession` returned: once for every activation of a context whose `hasAccess`, as read when the list was judged, is truthy — a context entered again is activated again. The context session then starts the session `buildSession` returned, which raises `menu-requested` to its own callback, if it has one: with `restart: false` unless it had already been started, and not at all if it was closed before that start | none |
+| `listing-unavailable` | `start()` settles on `UNAVAILABLE` | `reason`: `rejected`, `not-a-list` |
+| `answer-discarded` | what a call was waiting for arrives after a later `start()`, `selectContext()` or `close()`: the list of a `start()`, the menu an activation started, or the decisions of a `decide()`, which resolves with the empty list | `operation`: `listing`, `activation`, `decide` |
+
+**Every field holds a value this package built.** None holds a context, an identifier, an error, or
+anything read out of an answer.
+
+**It is called in a task of its own.** Each event is handed over through `setTimeout`, never from
+inside a call of this package, and nothing this package does waits for it: what it returns is not
+read, so a promise it returns is not awaited and its rejection is not caught. **What it throws is
+discarded**, and the session carries on as if it had not been called. Like any code, a callback that
+blocks the thread blocks everything that runs on it. It must be a function, or the constructor throws
+a `RangeError`.
 
 ## The seam, and its rule
 

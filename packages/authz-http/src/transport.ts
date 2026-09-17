@@ -40,6 +40,22 @@ export interface HttpTransportConfig {
    */
   readonly contextHeader?: string;
   /**
+   * The field of the response body that must echo {@link contextId}. **Optional; `"contextId"` when
+   * omitted.** Read only when `contextId` is supplied.
+   *
+   * **Configuration and never a constant, for the same reason as {@link contextHeader}:** a backend
+   * that echoes the context under another name is not wrong, and a name baked in here would reject
+   * every one of its answers.
+   *
+   * The name changes where the echo is read and nothing about how it is judged: an answer is used only
+   * when that field, read once, is a string equal to `contextId`. A missing field, one that is not a
+   * string, and one that echoes a different context are rejected, as they are under the default name.
+   *
+   * It must be a non-empty string, or the constructor throws a `RangeError`: an empty name, or one
+   * that is not a string, names no field an answer could carry.
+   */
+  readonly contextField?: string;
+  /**
    * The bearer token, or `null` when there is none.
    *
    * Returning `null` omits the `Authorization` header **entirely** — an empty one is a different
@@ -124,11 +140,11 @@ export interface HttpTransportConfig {
    *
    * <h3>What a call-time path error looks like from ABOVE</h3>
    *
-   * **Nothing names it.** Neither this package nor the core has a diagnostic channel — the core says
-   * so about itself, and no published code of any of the three packages calls `console`. The
-   * `RangeError` reaches whoever called `fetchPermissions` or `fetchDecisions`
-   * directly; through `createAuthorizationSession` it is caught and turned into state, and nothing is
-   * printed anywhere.
+   * **Nothing names it.** The `RangeError` reaches whoever called `fetchPermissions` or
+   * `fetchDecisions` directly, and no published code of any of the three packages calls `console`.
+   * Through `createAuthorizationSession` it is caught and turned into state. No diagnostic event names
+   * the option: {@link onDiagnostic} is told only of an `AuthorizationTransportError`, and this is not
+   * one, and what a session's `onDiagnostic` hears of it is the reason `rejected`.
    *
    * And the two options do not fail alike. Measured through a real core session, with a path that
    * passes the construction probe and fails for the real id, against a backend that permits `read`
@@ -166,7 +182,58 @@ export interface HttpTransportConfig {
     readonly permissions?: (encodedApp: string) => string;
     readonly decisions?: (encodedApp: string) => string;
   };
+  /**
+   * Told which rule refused a call, as an {@link HttpTransportDiagnostic}. **Optional**, and nothing the
+   * transport sends, returns or rejects with depends on whether it is given.
+   *
+   * **Called in a task of its own.** Each event is handed to it through `setTimeout`, never from inside
+   * a call of this package, and nothing this package does waits for it: what it returns is not read, so
+   * a promise it returns is not awaited and its rejection is not caught. Like any code, a callback that
+   * blocks the thread blocks everything that runs on it.
+   *
+   * **What it throws is discarded**, and the transport carries on as if it had not been called.
+   *
+   * It must be a function, or the constructor throws a `RangeError`.
+   */
+  readonly onDiagnostic?: (event: HttpTransportDiagnostic) => void;
 }
+
+/**
+ * What a transport tells {@link HttpTransportConfig.onDiagnostic}: which rule refused a call.
+ *
+ * **Data, not a message.** Every event is a new frozen object with a `kind` and the fields its kind
+ * declares, and every field holds a value this package built: an operation or a reason named here. None
+ * holds a token, a header, a route, a status, a body, or anything else read out of a response.
+ */
+export type HttpTransportDiagnostic = {
+  /**
+   * The call rejected with an `AuthorizationTransportError`: raised once for every call that does.
+   * `operation` is the method that was called — `permissions` for `fetchPermissions`, `decisions` for
+   * `fetchDecisions` — and `reason` is the rule:
+   *
+   * - `no-response` — no response arrived: the token could not be obtained, or the request did not
+   *   complete;
+   * - `status` — the response status is not in the 2xx range;
+   * - `not-json` — the body is not JSON;
+   * - `not-an-object` — the body is not an object;
+   * - `no-app` — the body's `app` is missing or not a string;
+   * - `no-list` — the body's `permissions` or `decisions` is missing or not an array;
+   * - `no-context-echo` — a `contextId` was configured and the body's echo field is missing or not a
+   *   string;
+   * - `other-context` — that field echoes a different context.
+   */
+  readonly kind: "call-failed";
+  readonly operation: "permissions" | "decisions";
+  readonly reason:
+    | "no-response"
+    | "status"
+    | "not-json"
+    | "not-an-object"
+    | "no-app"
+    | "no-list"
+    | "no-context-echo"
+    | "other-context";
+};
 
 /**
  * Build an {@link AuthorizationTransport} over `fetch`.
@@ -193,9 +260,10 @@ export interface HttpTransportConfig {
  *
  * - **Neither `contextId` nor `contextHeader`:** no header is sent, no echo is required. A backend
  *   that has never heard of contexts works unchanged.
- * - **Both:** the header carries the id, and a response body whose `contextId` does not echo it is
- *   **rejected loudly**, with the same message discipline as every other rejection here — the route
- *   and the field, never the body, never the token, never the header value.
+ * - **Both:** the header carries the id, and a response body whose echo field — `contextId`, or the
+ *   name given as `contextField` — does not echo it is **rejected loudly**, with the same message
+ *   discipline as every other rejection here — the route and the field, never the body, never the
+ *   token, never the header value.
  * - **One without the other:** rejected at construction with a `RangeError` naming which is
  *   missing. A header name with nothing to put in it, or an id with nowhere to send it, is a
  *   configuration mistake, and discovering it as a `401` costs far more than discovering it here.
@@ -217,7 +285,8 @@ export interface HttpTransportConfig {
  * line that sets the header.
  */
 export function createHttpTransport(config: HttpTransportConfig): AuthorizationTransport {
-  const { baseUrl, contextId, contextHeader, getToken, classifyError } = config;
+  const { baseUrl, contextId, contextHeader, contextField = "contextId", getToken, classifyError, onDiagnostic } =
+    config;
   const doFetch = config.fetch ?? globalThis.fetch;
   const root = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
 
@@ -232,6 +301,23 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
   if (contextHeader !== undefined && contextId === undefined) {
     throw new RangeError("contextId is required when contextHeader is supplied");
   }
+  // The echo field names what an answer must carry, so a name that no answer can carry is a
+  // configuration mistake like the two above. The message gives the type it received and never the
+  // value.
+  if (typeof contextField !== "string" || contextField === "") {
+    throw new RangeError(
+      `contextField must be a non-empty string, received ${
+        typeof contextField === "string"
+          ? "an empty string"
+          : contextField === null
+            ? "null"
+            : Array.isArray(contextField)
+              ? "an array"
+              : typeof contextField
+      }`,
+    );
+  }
+  const notify = notifier(onDiagnostic);
   probePath(config.paths?.permissions, "paths.permissions");
   probePath(config.paths?.decisions, "paths.decisions");
 
@@ -316,7 +402,7 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
     try {
       response = await doFetch(url, { ...init, headers: await headers(init.body !== undefined) });
     } catch {
-      throw new AuthorizationTransportError("UNAVAILABLE", `${route}: the request did not complete`);
+      throw refused("no-response", "UNAVAILABLE", `${route}: the request did not complete`);
     }
 
     // Parsed first, because `classifyError` is entitled to see the body when there is one — but a
@@ -343,13 +429,14 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
       } catch {
         chosen = undefined;
       }
-      throw new AuthorizationTransportError(
+      throw refused(
+        "status",
         chosen ?? (response.status === 403 ? "NO_ACCESS_IN_APP" : "UNAVAILABLE"),
         `${route}: responded ${response.status}`,
       );
     }
     if (!parsed) {
-      throw new AuthorizationTransportError("UNAVAILABLE", `${route}: the body is not JSON`);
+      throw refused("not-json", "UNAVAILABLE", `${route}: the body is not JSON`);
     }
     return body;
   }
@@ -365,36 +452,58 @@ export function createHttpTransport(config: HttpTransportConfig): AuthorizationT
     if (contextId === undefined) {
       return;
     }
-    const echoed = required(record, "contextId", route);
+    const echoed = required(record, contextField, route, "no-context-echo");
     if (echoed !== contextId) {
-      throw new AuthorizationTransportError(
+      throw refused(
+        "other-context",
         "UNAVAILABLE",
-        `${route}: the response "contextId" does not echo the one that was sent`,
+        `${route}: the response "${contextField}" does not echo the one that was sent`,
       );
+    }
+  }
+
+  /** Tells `onDiagnostic` the rule, when a call rejects with an error this transport built. */
+  function notifyRefusal(operation: HttpTransportDiagnostic["operation"], error: unknown): void {
+    if (notify === undefined) {
+      return;
+    }
+    const reason = error instanceof AuthorizationTransportError ? reasons.get(error) : undefined;
+    if (reason !== undefined) {
+      notify({ kind: "call-failed", operation, reason });
     }
   }
 
   return {
     async fetchPermissions(app) {
-      const route = routeFor(permissionsPath, app, "paths.permissions");
-      const body = await call(route, { method: "GET" });
-      const record = object(body, route);
-      requireContextEcho(record, route);
-      return {
-        app: required(record, "app", route),
-        permissions: array(record, "permissions", route) as PermissionMenu["permissions"],
-      };
+      try {
+        const route = routeFor(permissionsPath, app, "paths.permissions");
+        const body = await call(route, { method: "GET" });
+        const record = object(body, route);
+        requireContextEcho(record, route);
+        return {
+          app: required(record, "app", route, "no-app"),
+          permissions: array(record, "permissions", route) as PermissionMenu["permissions"],
+        };
+      } catch (error) {
+        notifyRefusal("permissions", error);
+        throw error;
+      }
     },
 
     async fetchDecisions(app, request: DecisionRequest) {
-      const route = routeFor(decisionsPath, app, "paths.decisions");
-      const body = await call(route, { method: "POST", body: JSON.stringify(request) });
-      const record = object(body, route);
-      requireContextEcho(record, route);
-      return {
-        app: required(record, "app", route),
-        decisions: array(record, "decisions", route) as DecisionSet["decisions"],
-      };
+      try {
+        const route = routeFor(decisionsPath, app, "paths.decisions");
+        const body = await call(route, { method: "POST", body: JSON.stringify(request) });
+        const record = object(body, route);
+        requireContextEcho(record, route);
+        return {
+          app: required(record, "app", route, "no-app"),
+          decisions: array(record, "decisions", route) as DecisionSet["decisions"],
+        };
+      } catch (error) {
+        notifyRefusal("decisions", error);
+        throw error;
+      }
     },
   };
 }
@@ -533,9 +642,9 @@ const defaultDecisionsPath = (encodedApp: string): string => `/me/apps/${encoded
  * mistake as a `contextHeader` with no `contextId`: the consumer configured something wrong, and no
  * server was involved.
  *
- * **It names the option to whoever calls this transport directly, and to nobody else.** There is
- * no diagnostic channel here or in the core, so through a session this error is caught and turned
- * into state — and measured, the state is not the same for the two options: a wrong permissions
+ * **It names the option to whoever calls this transport directly, and to nobody else.** Through a
+ * session this error is caught and turned into state, and no diagnostic event names the option — and
+ * measured, the state is not the same for the two options: a wrong permissions
  * path gives `UNAVAILABLE`, a wrong decisions path gives `READY` with every decision denied, because
  * a rejected chunk contributes nothing and absence reads as denial. See
  * {@link HttpTransportConfig.paths}.
@@ -579,7 +688,7 @@ function probePath(path: ((encodedApp: string) => string) | undefined, option: s
 /** The package never guesses a shape: a body that is not an object is a broken adapter, loudly. */
 function object(body: unknown, route: string): Record<string, unknown> {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
-    throw new AuthorizationTransportError("UNAVAILABLE", `${route}: the response is not an object`);
+    throw refused("not-an-object", "UNAVAILABLE", `${route}: the response is not an object`);
   }
   return body as Record<string, unknown>;
 }
@@ -591,10 +700,16 @@ function object(body: unknown, route: string): Record<string, unknown> {
  * that what a developer reads is "your backend did not echo `contextId` on this route", not an
  * application that denies everything and says nothing.
  */
-function required(record: Record<string, unknown>, field: string, route: string): string {
+function required(
+  record: Record<string, unknown>,
+  field: string,
+  route: string,
+  reason: "no-app" | "no-context-echo",
+): string {
   const value = record[field];
   if (typeof value !== "string") {
-    throw new AuthorizationTransportError(
+    throw refused(
+      reason,
       "UNAVAILABLE",
       `${route}: the response is missing the "${field}" field, or it is not a string`,
     );
@@ -605,10 +720,56 @@ function required(record: Record<string, unknown>, field: string, route: string)
 function array(record: Record<string, unknown>, field: string, route: string): readonly unknown[] {
   const value = record[field];
   if (!Array.isArray(value)) {
-    throw new AuthorizationTransportError(
+    throw refused(
+      "no-list",
       "UNAVAILABLE",
       `${route}: the response is missing the "${field}" array, or it is not an array`,
     );
   }
   return value;
+}
+
+/** The rule each error this transport built was refused on, for `onDiagnostic`. */
+const reasons = new WeakMap<AuthorizationTransportError, HttpTransportDiagnostic["reason"]>();
+
+/** An error this transport rejects with, remembered with the rule that refused the call. */
+function refused(
+  reason: HttpTransportDiagnostic["reason"],
+  kind: TransportErrorKind,
+  message: string,
+): AuthorizationTransportError {
+  const error = new AuthorizationTransportError(kind, message);
+  reasons.set(error, reason);
+  return error;
+}
+
+/**
+ * How a transport tells `onDiagnostic`, or `undefined` when no callback was given, and then no event is built
+ * and nothing is scheduled.
+ *
+ * The event is handed over in a task of its own, inside a `try`: the callback is the consumer's code,
+ * and neither what it throws nor how long it takes belongs to the call that raised the event.
+ */
+function notifier(onDiagnostic: unknown): ((event: HttpTransportDiagnostic) => void) | undefined {
+  if (onDiagnostic === undefined) {
+    return undefined;
+  }
+  if (typeof onDiagnostic !== "function") {
+    throw new RangeError(
+      `onDiagnostic must be a function, received ${
+        onDiagnostic === null ? "null" : Array.isArray(onDiagnostic) ? "an array" : typeof onDiagnostic
+      }`,
+    );
+  }
+  const callback = onDiagnostic as (event: HttpTransportDiagnostic) => void;
+  return (event) => {
+    const frozen = Object.freeze(event);
+    setTimeout(() => {
+      try {
+        callback(frozen);
+      } catch {
+        // Discarded. See `onDiagnostic`.
+      }
+    }, 0);
+  };
 }

@@ -1352,3 +1352,196 @@ describe("a context list element that is not an object is read the way an object
     expect([session.getState().status, built]).toEqual(["IN_CONTEXT", ["ctx-a"]]);
   });
 });
+
+describe("the contexts as of the last listing, beside the state", () => {
+  it("is undefined before any listing, and while the first one is in flight", async () => {
+    const parked = deferred<readonly AuthorizationContext[]>();
+    const session = createContextSession({
+      app: APP,
+      contextTransport: { listContexts: () => parked.promise },
+      buildSession: (id) => fakeSession(id).session,
+    });
+
+    const before = session.lastListedContexts();
+    const starting = session.start();
+    const during = session.lastListedContexts();
+    parked.resolve([context("ctx-a"), context("ctx-b")]);
+    await starting;
+
+    expect([before, during, session.lastListedContexts()]).toEqual([
+      undefined,
+      undefined,
+      [context("ctx-a"), context("ctx-b")],
+    ]);
+  });
+
+  it("is an empty array after a listing that named no context", async () => {
+    const { session } = build([]);
+
+    await session.start();
+
+    expect([session.getState().status, session.lastListedContexts()]).toEqual(["NO_CONTEXTS", []]);
+  });
+
+  it("stays the list once a context is chosen, where the state no longer carries it", async () => {
+    const { session } = build([context("ctx-a"), context("ctx-b")]);
+
+    await session.start();
+    await session.selectContext("ctx-b");
+
+    expect(session.getState()).not.toHaveProperty("contexts");
+    expect(session.lastListedContexts()).toEqual([context("ctx-a"), context("ctx-b")]);
+  });
+
+  it("holds the list on the single-context path, where no state ever carries it", async () => {
+    const { session } = build([context("ctx-a")]);
+
+    await session.start();
+
+    expect([session.getState().status, session.lastListedContexts()]).toEqual(["IN_CONTEXT", [context("ctx-a")]]);
+  });
+
+  it("is undefined after a listing that failed, and after one that was not a list of contexts", async () => {
+    const listings: (() => Promise<unknown>)[] = [
+      async () => [context("ctx-a"), context("ctx-b")],
+      async () => {
+        throw new Error("the context service is down");
+      },
+      async () => [context("ctx-a"), context("ctx-b")],
+      async () => ({ items: [context("ctx-a")] }),
+    ];
+    const session = createContextSession({
+      app: APP,
+      contextTransport: { listContexts: () => (listings.shift() as () => Promise<never>)() },
+      buildSession: (id) => fakeSession(id).session,
+    });
+    const seen: unknown[] = [];
+
+    for (let i = 0; i < 4; i += 1) {
+      await session.start();
+      seen.push([session.getState().status, session.lastListedContexts()]);
+    }
+
+    expect(seen).toEqual([
+      ["CHOOSING_CONTEXT", [context("ctx-a"), context("ctx-b")]],
+      ["UNAVAILABLE", undefined],
+      ["CHOOSING_CONTEXT", [context("ctx-a"), context("ctx-b")]],
+      ["UNAVAILABLE", undefined],
+    ]);
+  });
+
+  it("is undefined after close()", async () => {
+    const { session } = build([context("ctx-a"), context("ctx-b")]);
+
+    await session.start();
+    session.close();
+
+    expect(session.lastListedContexts()).toBeUndefined();
+  });
+
+  it("keeps the last list while a later listing is in flight, and takes the new one when it ends", async () => {
+    const second = deferred<readonly AuthorizationContext[]>();
+    const listings: (() => Promise<readonly AuthorizationContext[]>)[] = [
+      async () => [context("ctx-a"), context("ctx-b")],
+      () => second.promise,
+    ];
+    const session = createContextSession({
+      app: APP,
+      contextTransport: { listContexts: () => (listings.shift() as () => Promise<never>)() },
+      buildSession: (id) => fakeSession(id).session,
+    });
+
+    await session.start();
+    const restarting = session.start();
+    const during = [session.getState().status, session.lastListedContexts()];
+    second.resolve([context("ctx-c"), context("ctx-d")]);
+    await restarting;
+
+    expect(during).toEqual(["LOADING_CONTEXTS", [context("ctx-a"), context("ctx-b")]]);
+    expect(session.lastListedContexts()).toEqual([context("ctx-c"), context("ctx-d")]);
+  });
+
+  it("a listing superseded by a later start() or by close() is not the last listing", async () => {
+    const late = deferred<readonly AuthorizationContext[]>();
+    const listings: (() => Promise<readonly AuthorizationContext[]>)[] = [
+      () => late.promise,
+      async () => [context("ctx-a"), context("ctx-b")],
+    ];
+    const session = createContextSession({
+      app: APP,
+      contextTransport: { listContexts: () => (listings.shift() as () => Promise<never>)() },
+      buildSession: (id) => fakeSession(id).session,
+    });
+    const closedLate = deferred<readonly AuthorizationContext[]>();
+    const closing = createContextSession({
+      app: APP,
+      contextTransport: { listContexts: () => closedLate.promise },
+      buildSession: (id) => fakeSession(id).session,
+    });
+
+    const first = session.start();
+    await session.start();
+    late.resolve([context("ctx-z")]);
+    await first;
+    const closingStart = closing.start();
+    closing.close();
+    closedLate.resolve([context("ctx-z"), context("ctx-y")]);
+    await closingStart;
+
+    expect([session.lastListedContexts(), closing.lastListedContexts()]).toEqual([
+      [context("ctx-a"), context("ctx-b")],
+      undefined,
+    ]);
+  });
+
+  it("returns a new array each call: what a caller does to one reaches neither the next call nor a later state", async () => {
+    const { session } = build([context("ctx-a"), context("ctx-b"), context("ctx-c", false)]);
+    await session.start();
+
+    const first = session.lastListedContexts() as AuthorizationContext[];
+    first.pop();
+    first.push(context("ctx-planted"));
+    const second = session.lastListedContexts();
+    await session.selectContext("ctx-c");
+
+    expect(second).not.toBe(first);
+    expect(second).toEqual([context("ctx-a"), context("ctx-b"), context("ctx-c", false)]);
+    expect(session.getState()).toMatchObject({
+      status: "NO_ACCESS_IN_APP",
+      contexts: [context("ctx-a"), context("ctx-b"), context("ctx-c", false)],
+    });
+  });
+
+  it("its elements are the contexts as the listing returned them, the same objects a state carrying contexts holds", async () => {
+    const listed = [context("ctx-a"), context("ctx-b")];
+    const { session } = build(listed);
+
+    await session.start();
+    const state = session.getState() as { contexts: readonly AuthorizationContext[] };
+    const last = session.lastListedContexts() as readonly AuthorizationContext[];
+
+    expect([last[0] === listed[0], last[1] === listed[1], last[0] === state.contexts[0]]).toEqual([true, true, true]);
+  });
+
+  it("already holds the list when the state that follows the listing is emitted", async () => {
+    const { session } = build([context("ctx-a"), context("ctx-b")]);
+    const heard: unknown[] = [];
+    session.subscribe((state) => heard.push([state.status, session.lastListedContexts()]));
+
+    await session.start();
+
+    expect(heard).toEqual([
+      ["LOADING_CONTEXTS", undefined],
+      ["CHOOSING_CONTEXT", [context("ctx-a"), context("ctx-b")]],
+    ]);
+  });
+
+  it("leaves out an element that names no context, as the state does", async () => {
+    const { session } = build([context("ctx-a"), { label: "none" } as unknown as AuthorizationContext, context("ctx-b")]);
+
+    await session.start();
+
+    expect(session.lastListedContexts()).toEqual((session.getState() as { contexts: unknown }).contexts);
+    expect(session.lastListedContexts()).toEqual([context("ctx-a"), context("ctx-b")]);
+  });
+});

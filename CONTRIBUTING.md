@@ -32,11 +32,26 @@ pnpm typecheck
 ## Release checklist
 
 1. Collapse the pending changesets into one that describes the release (see below).
-2. **When the core's new version falls outside the range, bump it by hand. While the core is `0.x`,
-   that is every minor.** The range is the literal peer range, and there are now **two** files that
-   carry one: `packages/authz-http/package.json` and `packages/authz-context/package.json`. Both, or
-   the one you forget publishes a compatibility claim nobody verified.
-3. Run the version step on a copy and read its output (see below).
+2. **When the core's new version falls outside the range, bump it by hand, before the version step.
+   While the core is `0.x`, that is every minor.** The range is the literal peer range, and there are
+   now **two** files that carry one: `packages/authz-http/package.json` and
+   `packages/authz-context/package.json`. Both, or the one you forget publishes a compatibility claim
+   nobody verified. For a core going from `0.1.0` to `0.2.0` it is this line, in both files:
+
+   ```diff
+      "peerDependencies": {
+   -    "@ricardoqmd/authz-core": "^0.1.0"
+   +    "@ricardoqmd/authz-core": "^0.2.0"
+      },
+   ```
+
+3. Run the version step on a copy and read its output (see below). **With both ranges raised, it prints
+   `Package "@ricardoqmd/authz-context" must depend on the current version of "@ricardoqmd/authz-core":
+   "0.1.0" vs "^0.2.0"` twice, the same line for `@ricardoqmd/authz-http` twice, then `All files have
+   been updated`, and exits `0`; the three packages come out on `0.2.0` and both ranges stay
+   `^0.2.0`.** A package missing from those lines is one whose range was not raised, and it comes out
+   on `1.0.0`: measured with only `authz-http` forgotten, `authz-context` and the core came out on
+   `0.2.0` and `authz-http` on `1.0.0`.
 4. Only then release.
 
 ## Before a release: run the version step on a copy and read its output
@@ -82,7 +97,8 @@ being irrelevant and becomes the only thing separating the two outcomes:
 | `>=0.1.0` | off | `0.2.0` | `1.0.0` | `>=0.2.0` |
 | `>=0.1.0` | on | `0.2.0` | `0.1.0` | `>=0.1.0` |
 
-That is why this repository declares `"@ricardoqmd/authz-core": "^0.1.0"`. It publishes the same range
+That is why this repository declares a literal range — `"@ricardoqmd/authz-core": "^0.1.0"` at the first
+release, `"^0.2.0"` at the second. It publishes the same range
 `workspace:^` would have published, and keeps the dependency a peer — a consumer must not end up with
 two copies of the core's types. The experimental flag changes nothing for it at either release, which
 is why what keeps this range true is the checklist item below and not an option.
@@ -108,14 +124,17 @@ anything. The option that buys this is called
 
 **Its one real cost, and it is a checklist item:** a literal range does **not** follow the core by
 itself. **When the core's new version falls outside the range, bump it by hand. While the core is
-`0.x`, that is every minor.** The range lives in `packages/authz-http/package.json`; `workspace:^` did
-that automatically, and this does not. `ROADMAP.md` schedules `v0.2.0` as the next release, which is
-exactly the minor that fires this item.
+`0.x`, that is every minor.** The range lives in `packages/authz-http/package.json` and
+`packages/authz-context/package.json`; `workspace:^` did that automatically, and this does not.
 
-You will also see `changeset version` print `must depend on the current version of
-"@ricardoqmd/authz-core": "0.0.0" vs "^0.1.0"` while the working tree still holds the pre-release
-numbers. That is the range naming the version about to be published rather than the one on disk; it
-resolves the moment the bump lands, and `install`, `build` and `test` are green on both sides of it.
+**Why the raised range does not bring the major with it.** Between raising the range and the version
+step, the range names the version about to be published and not the one on disk, so `changeset version`
+prints `must depend on the current version of "@ricardoqmd/authz-core"` with the version on disk and the
+range — `"0.0.0" vs "^0.1.0"` at the first release, `"0.1.0" vs "^0.2.0"` at the second — and does not
+count that package as a dependent of the core while it does. A package that is not a dependent is not
+bumped for the core's bump: it comes out on the version its own changeset asks for. The line resolves
+the moment the bump lands, and `install`, `build` and `test` are green on both sides of it — at the second
+release, `typecheck` too.
 
 **The release notes.** The notes are assembled from every pending changeset, so a feature added and
 removed across several unpublished rounds is announced twice — once as an addition and once as a
