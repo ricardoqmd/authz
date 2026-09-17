@@ -1,6 +1,6 @@
 {
   "name": "@ricardoqmd/authz-http",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A reference AuthorizationTransport over fetch, which rejects loudly when a backend does not echo the app and context it was asked about",
   "keywords": [
     "authorization",
