@@ -65,7 +65,45 @@ what is still coupled while the core is `0.x`, are in
    not raised, and it comes out on `1.0.0`: measured with only `authz-http` forgotten, `authz-context` and
    the core came out on `0.2.0` and `authz-http` on `1.0.0`, and measured with only the core's range of
    `authz-react` raised, `authz-react` came out on `1.0.0`.
-4. Only then release.
+
+   **Those lines belong to a release that moves the core, and a release that does not move it prints
+   none of them.** Measured at the release of `@ricardoqmd/authz-react@0.1.0`, where the core stayed on
+   `0.2.0`: the version step printed `All files have been updated` and nothing else, because no package
+   the others declare was entering the release. Their absence is not a finding there. What is read
+   instead is the diff — exactly two files, the consumed changeset and one line of the released
+   package's `package.json` — plus the version number itself, which `--stat` does not show:
+
+   ```bash
+   git --no-pager diff packages/<released>/package.json
+   ls packages/<released>/CHANGELOG.md
+   ```
+
+4. Release, and then **verify against the registry** — see below.
+
+## After a release: the tool's success message is not proof
+
+**`changeset publish` can report success for a package that never reached the registry, and it creates
+the git tag anyway.** Measured at the release of `@ricardoqmd/authz-react@0.1.0`: the npm CLI died
+mid-authentication with `Exit handler never called!`, Changesets printed
+`success packages published successfully` and `New tag: ...`, and the registry answered `404` to
+`npm view` three minutes later. The success line reports that the child process ended, not that the
+tarball landed.
+
+The last step of every release is therefore a read of the registry itself, and nothing else counts:
+
+```bash
+npm view <package> versions
+```
+
+Two things this rule needs in order to be usable:
+
+- **The account's package listing on the website is not the registry.** It is a cached index and it
+  lags behind both a successful publish and a failed one, in both directions.
+- **A `404` right after publishing is ambiguous**, and the way to resolve it is to publish again rather
+  than to guess: `npm publish --access public` from the package directory answers `E403` with
+  `cannot publish over the previously published version` if it was in fact published, and otherwise
+  publishes it. Never resolve it by bumping the version — that publishes a number no change
+  corresponds to, and leaves the git tag pointing at something the registry does not have.
 
 ## Before a release: run the version step on a copy and read its output
 
