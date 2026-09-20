@@ -53,8 +53,9 @@ not in any package yet.
 | `@ricardoqmd/authz-core` | What a subject may do in one application: the decision vocabulary, the render rule and the session. **No context concept.** |
 | `@ricardoqmd/authz-context` | The authorization context a subject works under: listing, choosing, and one permissions session per context |
 | `@ricardoqmd/authz-http` | A reference `AuthorizationTransport` over `fetch`, with an optional authorization-context header |
+| `@ricardoqmd/authz-react` | A React binding: a provider, hooks and a guard over a session. **No transport concept.** |
 
-Bindings for React and Vue are planned; see [ROADMAP.md](./ROADMAP.md).
+A Vue binding is planned; see [ROADMAP.md](./ROADMAP.md).
 
 ## Install
 

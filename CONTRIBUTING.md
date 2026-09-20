@@ -34,9 +34,11 @@ pnpm typecheck
 1. Collapse the pending changesets into one that describes the release (see below).
 2. **When the core's new version falls outside the range, bump it by hand, before the version step.
    While the core is `0.x`, that is every minor.** The range is the literal peer range, and there are
-   now **two** files that carry one: `packages/authz-http/package.json` and
-   `packages/authz-context/package.json`. Both, or the one you forget publishes a compatibility claim
-   nobody verified. For a core going from `0.1.0` to `0.2.0` it is this line, in both files:
+   now **three** files that carry one: `packages/authz-http/package.json`,
+   `packages/authz-context/package.json` and `packages/authz-react/package.json` — and the last carries
+   **two** ranges, the core's and `@ricardoqmd/authz-context`'s. All of them, or the one you forget
+   publishes a compatibility claim nobody verified. For a core going from `0.1.0` to `0.2.0` it is this
+   line, in all three:
 
    ```diff
       "peerDependencies": {
@@ -45,13 +47,20 @@ pnpm typecheck
       },
    ```
 
-3. Run the version step on a copy and read its output (see below). **With both ranges raised, it prints
+   `@ricardoqmd/authz-react` is versioned on its own, so the changeset of the release does not move it: give
+   it a changeset of its own with its raised ranges. Without one it keeps the version it has and is not
+   published, and the registry goes on declaring the previous ranges.
+
+3. Run the version step on a copy and read its output (see below). **At the release that took the core
+   to `0.2.0`, with both ranges raised, it printed
    `Package "@ricardoqmd/authz-context" must depend on the current version of "@ricardoqmd/authz-core":
    "0.1.0" vs "^0.2.0"` twice, the same line for `@ricardoqmd/authz-http` twice, then `All files have
-   been updated`, and exits `0`; the three packages come out on `0.2.0` and both ranges stay
-   `^0.2.0`.** A package missing from those lines is one whose range was not raised, and it comes out
-   on `1.0.0`: measured with only `authz-http` forgotten, `authz-context` and the core came out on
-   `0.2.0` and `authz-http` on `1.0.0`.
+   been updated`, and exited `0`; the three packages came out on `0.2.0` and both ranges stayed
+   `^0.2.0`.** With `@ricardoqmd/authz-react` it also prints its own two lines twice each: one for the
+   core and one for `@ricardoqmd/authz-context`. A package missing from those lines is one whose range was
+   not raised, and it comes out on `1.0.0`: measured with only `authz-http` forgotten, `authz-context` and
+   the core came out on `0.2.0` and `authz-http` on `1.0.0`, and measured with only the core's range of
+   `authz-react` raised, `authz-react` came out on `1.0.0`.
 4. Only then release.
 
 ## Before a release: run the version step on a copy and read its output
@@ -124,8 +133,8 @@ anything. The option that buys this is called
 
 **Its one real cost, and it is a checklist item:** a literal range does **not** follow the core by
 itself. **When the core's new version falls outside the range, bump it by hand. While the core is
-`0.x`, that is every minor.** The range lives in `packages/authz-http/package.json` and
-`packages/authz-context/package.json`; `workspace:^` did that automatically, and this does not.
+`0.x`, that is every minor.** The ranges live in the three files the release checklist names;
+`workspace:^` did that automatically, and this does not.
 
 **Why the raised range does not bring the major with it.** Between raising the range and the version
 step, the range names the version about to be published and not the one on disk, so `changeset version`
