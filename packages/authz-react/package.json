@@ -1,6 +1,6 @@
 {
   "name": "@ricardoqmd/authz-react",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "React binding for the authorization sessions: a provider that builds and closes them, permission hooks and a guard",
   "keywords": [
     "authorization",
