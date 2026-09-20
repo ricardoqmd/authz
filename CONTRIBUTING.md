@@ -31,6 +31,10 @@ pnpm typecheck
 
 ## Release checklist
 
+Each package carries its own version and its own changeset; they do not move as a set. The reasons, and
+what is still coupled while the core is `0.x`, are in
+[ADR-001](./docs/decisions/001-independent-versioning.md).
+
 1. Collapse the pending changesets into one that describes the release (see below).
 2. **When the core's new version falls outside the range, bump it by hand, before the version step.
    While the core is `0.x`, that is every minor.** The range is the literal peer range, and there are
