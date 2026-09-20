@@ -12,8 +12,12 @@ consumer, and freezing it before that would freeze its mistakes too.
 - [ ] **v0.1.0** — core: the three questions, the state machine for context selection,
       fail-closed defaults, batch splitting, and invalidation on context change.
 - [ ] **v0.2.0** — cross-tab coherence and the transport port documented as a stable seam.
-- [ ] **v0.3.0** — React bindings.
-- [ ] **v0.4.0** — Vue bindings.
+
+Framework bindings are versioned on their own rather than in this train: they change when the framework
+changes, not when the model does.
+
+- [x] **`@ricardoqmd/authz-react`** — a React binding.
+- [ ] A Vue binding.
 
 ## Criteria for 1.0.0
 
